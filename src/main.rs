@@ -4,7 +4,7 @@ mod disk;
 mod ntfs;
 mod theme;
 
-use disk::DriveInfo;
+use disk::{DriveKind, VolumeInfo};
 use ntfs::{RecoveredFile, ScanProgress};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +18,7 @@ enum Screen {
 }
 
 struct ScanHandle {
-    drive_label: String,
+    source_label: String,
     cancel: Arc<AtomicBool>,
     progress: Arc<Mutex<ScanProgress>>,
     found: Arc<Mutex<Vec<RecoveredFile>>>,
@@ -28,33 +28,32 @@ struct ScanHandle {
 }
 
 struct DataRecovererApp {
-    drives: Vec<DriveInfo>,
-    selected_drive: Option<usize>,
+    volumes: Vec<VolumeInfo>,
+    scan_source_path: Option<String>,
     screen: Screen,
     scan: Option<ScanHandle>,
     selected: Vec<bool>,
     open_category: Option<&'static str>,
-    error: Option<String>,
+    /// (text, is_success) shown at the bottom of a screen.
+    message: Option<(String, bool)>,
 }
 
 impl Default for DataRecovererApp {
     fn default() -> Self {
         Self {
-            drives: disk::list_physical_drives(),
-            selected_drive: None,
+            volumes: disk::list_volumes(),
+            scan_source_path: None,
             screen: Screen::Home,
             scan: None,
             selected: Vec::new(),
             open_category: None,
-            error: None,
+            message: None,
         }
     }
 }
 
 impl DataRecovererApp {
-    fn start_scan(&mut self, drive_index: usize, ctx: &egui::Context) {
-        self.selected_drive = Some(drive_index);
-        let drive = self.drives[drive_index].clone();
+    fn start_scan(&mut self, path: String, label: String, ctx: &egui::Context) {
         let cancel = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Mutex::new(ScanProgress {
             records_scanned: 0,
@@ -67,9 +66,10 @@ impl DataRecovererApp {
         let thread_progress = progress.clone();
         let thread_found = found.clone();
         let thread_ctx = ctx.clone();
+        let thread_path = path.clone();
 
         std::thread::spawn(move || {
-            let result = ntfs::scan_drive(&drive.path, &thread_cancel, &thread_found, |p| {
+            let result = ntfs::scan_drive(&thread_path, &thread_cancel, &thread_found, |p| {
                 *thread_progress.lock().unwrap() = p;
                 thread_ctx.request_repaint();
             });
@@ -77,11 +77,12 @@ impl DataRecovererApp {
             thread_ctx.request_repaint();
         });
 
-        self.error = None;
+        self.message = None;
         self.selected.clear();
         self.open_category = None;
+        self.scan_source_path = Some(path);
         self.scan = Some(ScanHandle {
-            drive_label: format!("PhysicalDrive{}", self.drives[drive_index].index),
+            source_label: label,
             cancel,
             progress,
             found,
@@ -112,11 +113,7 @@ impl DataRecovererApp {
         ui.add_space(24.0);
         ui.horizontal(|ui| {
             ui.add_space(16.0);
-            ui.label(
-                egui::RichText::new("RECOVER")
-                    .size(11.0)
-                    .color(theme::TEXT_DIM),
-            );
+            ui.label(egui::RichText::new("HERSTEL").size(11.0).color(theme::TEXT_DIM));
         });
         ui.add_space(4.0);
 
@@ -128,7 +125,7 @@ impl DataRecovererApp {
             ui.add_space(10.0);
             frame.show(ui, |ui| {
                 ui.label(
-                    egui::RichText::new("Drives & Locations")
+                    egui::RichText::new("Schijven & locaties")
                         .color(theme::ACCENT)
                         .strong(),
                 );
@@ -137,91 +134,127 @@ impl DataRecovererApp {
     }
 
     fn draw_home(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.add_space(8.0);
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.heading("Choose a location to start recovery");
+            ui.heading("Kies een locatie om het herstel te starten");
+            ui.add_space(6.0);
             if ui
-                .add(theme::outline_button("⟳ Refresh"))
-                .on_hover_text("Rescan for drives")
+                .add(theme::outline_button("⟳"))
+                .on_hover_text("Opnieuw zoeken naar schijven")
                 .clicked()
             {
-                self.drives = disk::list_physical_drives();
+                self.volumes = disk::list_volumes();
             }
         });
-        ui.add_space(16.0);
+        ui.add_space(18.0);
 
-        ui.label(
-            egui::RichText::new(format!("Hard Drives ({})", self.drives.len()))
-                .color(theme::TEXT_DIM),
-        );
-        ui.add_space(8.0);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let internal: Vec<usize> = self
+                .volumes
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| v.kind == DriveKind::Internal)
+                .map(|(i, _)| i)
+                .collect();
+            let external: Vec<usize> = self
+                .volumes
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| v.kind == DriveKind::External)
+                .map(|(i, _)| i)
+                .collect();
 
-        if self.drives.is_empty() {
-            theme::card_frame().show(ui, |ui| {
-                ui.label("No accessible physical drives found. Try running as Administrator.");
-            });
-            return;
-        }
+            let mut to_scan: Option<usize> = None;
 
-        let card_size = egui::vec2(260.0, 96.0);
-        let mut clicked_index = None;
+            section_label(ui, &format!("Harde schijven ({})", internal.len()));
+            ui.add_space(8.0);
+            if internal.is_empty() {
+                empty_hint(ui, "Geen interne schijven gevonden. Start als administrator.");
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    for &i in &internal {
+                        if draw_volume_card(ui, &self.volumes[i]) {
+                            to_scan = Some(i);
+                        }
+                    }
+                });
+            }
 
-        ui.horizontal_wrapped(|ui| {
-            for (i, drive) in self.drives.iter().enumerate() {
-                let (rect, response) = ui.allocate_exact_size(card_size, egui::Sense::click());
+            ui.add_space(20.0);
+            section_label(ui, &format!("Externe schijven ({})", external.len()));
+            ui.add_space(8.0);
+            if external.is_empty() {
+                empty_hint(ui, "Geen externe schijven aangesloten.");
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    for &i in &external {
+                        if draw_volume_card(ui, &self.volumes[i]) {
+                            to_scan = Some(i);
+                        }
+                    }
+                });
+            }
 
-                let bg = if response.hovered() {
-                    theme::ACCENT_SOFT
-                } else {
-                    theme::CARD_BG
-                };
-                ui.painter().rect_filled(rect, 10.0, bg);
-                ui.painter()
-                    .rect_stroke(rect, 10.0, egui::Stroke::new(1.0_f32, theme::CARD_BORDER));
-
-                let icon_rect = egui::Rect::from_min_size(
-                    rect.min + egui::vec2(16.0, 18.0),
-                    egui::vec2(40.0, 40.0),
-                );
-                ui.painter().rect_filled(icon_rect, 8.0, theme::ACCENT_SOFT);
-                ui.painter().text(
-                    icon_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "\u{1F4BD}",
-                    egui::FontId::proportional(20.0),
-                    theme::ACCENT,
-                );
-
-                let text_pos = rect.min + egui::vec2(68.0, 24.0);
-                ui.painter().text(
-                    text_pos,
-                    egui::Align2::LEFT_TOP,
-                    format!("PhysicalDrive{}", drive.index),
-                    egui::FontId::proportional(15.0),
-                    theme::TEXT_MAIN,
-                );
-                ui.painter().text(
-                    text_pos + egui::vec2(0.0, 22.0),
-                    egui::Align2::LEFT_TOP,
-                    disk::format_size(drive.size_bytes),
-                    egui::FontId::proportional(13.0),
-                    theme::TEXT_DIM,
-                );
-
-                if response.clicked() {
-                    clicked_index = Some(i);
+            ui.add_space(20.0);
+            section_label(ui, "Snelle toegang (4)");
+            ui.add_space(8.0);
+            let mut quick: Option<QuickAction> = None;
+            ui.horizontal_wrapped(|ui| {
+                if draw_quick_tile(ui, "\u{1F5BF}", "Schijfimage") {
+                    quick = Some(QuickAction::DiskImage);
                 }
-                ui.add_space(4.0);
+                if draw_quick_tile(ui, "\u{1F5A5}", "Desktop") {
+                    quick = Some(QuickAction::Desktop);
+                }
+                if draw_quick_tile(ui, "\u{1F4C1}", "Map selecteren") {
+                    quick = Some(QuickAction::SelectFolder);
+                }
+                if draw_quick_tile(ui, "\u{1F5D1}", "Prullenbak") {
+                    quick = Some(QuickAction::RecycleBin);
+                }
+            });
+
+            if let Some(i) = to_scan {
+                let vol = &self.volumes[i];
+                let path = vol.scan_path.clone();
+                let label = vol.display_name();
+                self.start_scan(path, label, ctx);
+            } else if let Some(action) = quick {
+                self.handle_quick_action(action, ctx);
+            }
+
+            if let Some((text, success)) = &self.message {
+                ui.add_space(12.0);
+                let color = if *success { theme::SUCCESS } else { theme::TEXT_DIM };
+                ui.colored_label(color, text);
             }
         });
+    }
 
-        if let Some(i) = clicked_index {
-            self.start_scan(i, ctx);
-        }
-
-        if let Some(err) = &self.error {
-            ui.add_space(12.0);
-            ui.colored_label(theme::DANGER, err);
+    fn handle_quick_action(&mut self, action: QuickAction, ctx: &egui::Context) {
+        match action {
+            QuickAction::DiskImage => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Schijfimage", &["img", "dd", "bin", "raw", "iso", "vhd"])
+                    .add_filter("Alle bestanden", &["*"])
+                    .pick_file()
+                {
+                    let label = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Schijfimage")
+                        .to_string();
+                    self.start_scan(path.to_string_lossy().into_owned(), label, ctx);
+                }
+            }
+            QuickAction::Desktop | QuickAction::SelectFolder | QuickAction::RecycleBin => {
+                self.message = Some((
+                    "Deze locatie wordt in een volgende versie ondersteund. \
+                     Kies voorlopig een schijf of een schijfimage."
+                        .to_string(),
+                    false,
+                ));
+            }
         }
     }
 
@@ -234,13 +267,13 @@ impl DataRecovererApp {
             if let Ok(result) = scan.done_rx.try_recv() {
                 match result {
                     Ok(()) => scan.finished = true,
-                    Err(e) => self.error = Some(format!("Scan failed: {e}")),
+                    Err(e) => self.message = Some((format!("Scan mislukt: {e}"), false)),
                 }
             }
         }
 
         let cancel = scan.cancel.clone();
-        let drive_label = scan.drive_label.clone();
+        let source_label = scan.source_label.clone();
         let finished = scan.finished;
         let elapsed_secs = scan.started_at.elapsed().as_secs();
         let found_snapshot = scan.found.lock().unwrap().clone();
@@ -261,14 +294,14 @@ impl DataRecovererApp {
         let total_found_size: u64 = found_snapshot.iter().map(|f| f.size).sum();
 
         ui.horizontal(|ui| {
-            if ui.add(theme::outline_button("← Drives")).clicked() {
+            if ui.add(theme::outline_button("← Schijven")).clicked() {
                 cancel.store(true, Ordering::Relaxed);
                 self.screen = Screen::Home;
                 self.scan = None;
-                self.error = None;
+                self.message = None;
             }
             ui.add_space(8.0);
-            ui.heading(format!("Reconstructed Files ({})", found_snapshot.len()));
+            ui.heading(format!("Gevonden bestanden ({})", found_snapshot.len()));
         });
         if self.scan.is_none() {
             return;
@@ -280,7 +313,7 @@ impl DataRecovererApp {
             .max_height((ui.available_height() - status_height).max(0.0))
             .show(ui, |ui| {
                 if found_snapshot.is_empty() {
-                    ui.colored_label(theme::TEXT_DIM, "No files found yet…");
+                    ui.colored_label(theme::TEXT_DIM, "Nog geen bestanden gevonden…");
                 } else if let Some(category) = self.open_category {
                     if ui.add(theme::outline_button(&format!("← {category}"))).clicked() {
                         self.open_category = None;
@@ -342,12 +375,12 @@ impl DataRecovererApp {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         let status_text = if finished {
-                            "Scan Complete"
+                            "Scan voltooid"
                         } else {
-                            "Quick Scanning"
+                            "Snel scannen"
                         };
                         ui.strong(status_text);
-                        ui.label(", Files Found:");
+                        ui.label(", bestanden gevonden:");
                         ui.colored_label(theme::ACCENT, format!("{}", found_snapshot.len()));
                         ui.colored_label(
                             theme::TEXT_DIM,
@@ -358,7 +391,7 @@ impl DataRecovererApp {
                         ui.colored_label(
                             theme::TEXT_DIM,
                             format!(
-                                "{drive_label} — {records_scanned}/{total_records} MFT records — Duration: {elapsed_secs}s"
+                                "{source_label} — {records_scanned}/{total_records} MFT-records — Duur: {elapsed_secs}s"
                             ),
                         );
                         if !finished && ui.add(theme::outline_button("Stop")).clicked() {
@@ -370,7 +403,7 @@ impl DataRecovererApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let any_selected = self.selected.iter().any(|s| *s);
                     if ui
-                        .add_enabled(any_selected, theme::accent_button("Recover"))
+                        .add_enabled(any_selected, theme::accent_button("Herstellen"))
                         .clicked()
                     {
                         self.recover_selected(&found_snapshot);
@@ -379,18 +412,15 @@ impl DataRecovererApp {
             });
         });
 
-        if let Some(err) = &self.error {
+        if let Some((text, success)) = &self.message {
             ui.add_space(8.0);
-            ui.colored_label(theme::SUCCESS, err);
+            let color = if *success { theme::SUCCESS } else { theme::DANGER };
+            ui.colored_label(color, text);
         }
     }
 
     fn recover_selected(&mut self, found_files: &[RecoveredFile]) {
-        let drive_path = self
-            .selected_drive
-            .and_then(|i| self.drives.get(i))
-            .map(|d| d.path.clone());
-        let Some(drive_path) = drive_path else {
+        let Some(drive_path) = self.scan_source_path.clone() else {
             return;
         };
 
@@ -403,14 +433,22 @@ impl DataRecovererApp {
                 continue;
             }
             if let Err(e) = ntfs::recover_file(&drive_path, found, &out_dir) {
-                self.error = Some(format!("Failed to recover {}: {e}", found.name));
+                self.message = Some((format!("Herstel van {} mislukt: {e}", found.name), false));
                 return;
             }
         }
 
         let count = self.selected.iter().filter(|selected| **selected).count();
-        self.error = Some(format!("Recovered {count} file(s) to {out_dir:?}"));
+        self.message = Some((format!("{count} bestand(en) hersteld naar {out_dir:?}"), true));
     }
+}
+
+#[derive(Clone, Copy)]
+enum QuickAction {
+    DiskImage,
+    Desktop,
+    SelectFolder,
+    RecycleBin,
 }
 
 impl eframe::App for DataRecovererApp {
@@ -434,6 +472,154 @@ impl eframe::App for DataRecovererApp {
                 Screen::Browse => self.draw_browse(ui),
             });
     }
+}
+
+fn section_label(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).size(14.0).color(theme::TEXT_DIM));
+}
+
+fn empty_hint(ui: &mut egui::Ui, text: &str) {
+    theme::card_frame().show(ui, |ui| {
+        ui.colored_label(theme::TEXT_DIM, text);
+    });
+}
+
+/// Draws a Recoverit-style volume card (filesystem + disk badges, label,
+/// usage, and a "Scannen" pill on hover) and returns whether it was clicked.
+fn draw_volume_card(ui: &mut egui::Ui, vol: &VolumeInfo) -> bool {
+    let card_size = egui::vec2(300.0, 104.0);
+    let (rect, response) = ui.allocate_exact_size(card_size, egui::Sense::click());
+
+    let bg = if response.hovered() {
+        theme::ACCENT_SOFT
+    } else {
+        theme::CARD_BG
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 12.0, bg);
+    painter.rect_stroke(rect, 12.0, egui::Stroke::new(1.0_f32, theme::CARD_BORDER));
+
+    // Badges top-left.
+    let mut badge_x = rect.min.x + 16.0;
+    let badge_y = rect.min.y + 14.0;
+    if !vol.filesystem.is_empty() {
+        badge_x = draw_badge(ui, egui::pos2(badge_x, badge_y), &vol.filesystem) + 6.0;
+    }
+    if let Some(idx) = vol.disk_index {
+        draw_badge(ui, egui::pos2(badge_x, badge_y), &format!("Schijf{idx}"));
+    }
+
+    // Disk icon.
+    let painter = ui.painter();
+    let icon_rect = egui::Rect::from_min_size(
+        rect.min + egui::vec2(16.0, 44.0),
+        egui::vec2(44.0, 44.0),
+    );
+    painter.rect_filled(icon_rect, 8.0, theme::ACCENT_SOFT);
+    painter.text(
+        icon_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "\u{1F5B4}",
+        egui::FontId::proportional(22.0),
+        theme::ACCENT,
+    );
+
+    // Name + usage.
+    let text_x = rect.min.x + 72.0;
+    painter.text(
+        egui::pos2(text_x, rect.min.y + 48.0),
+        egui::Align2::LEFT_TOP,
+        vol.display_name(),
+        egui::FontId::proportional(15.0),
+        theme::TEXT_MAIN,
+    );
+    painter.text(
+        egui::pos2(text_x, rect.min.y + 70.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "{} / {}",
+            disk::format_size(vol.used_bytes),
+            disk::format_size(vol.total_bytes)
+        ),
+        egui::FontId::proportional(12.0),
+        theme::TEXT_DIM,
+    );
+
+    // "Scannen" pill on hover.
+    if response.hovered() {
+        let pill = egui::Rect::from_min_size(
+            egui::pos2(rect.max.x - 92.0, rect.max.y - 34.0),
+            egui::vec2(76.0, 24.0),
+        );
+        painter.rect_filled(pill, 12.0, theme::ACCENT);
+        painter.text(
+            pill.center(),
+            egui::Align2::CENTER_CENTER,
+            "Scannen",
+            egui::FontId::proportional(12.0),
+            egui::Color32::WHITE,
+        );
+    }
+
+    ui.add_space(6.0);
+    response.clicked()
+}
+
+/// Draws a small rounded badge at `pos` and returns its right edge x.
+fn draw_badge(ui: &mut egui::Ui, pos: egui::Pos2, text: &str) -> f32 {
+    let font = egui::FontId::proportional(10.0);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font.clone(), theme::ACCENT);
+    let pad = 7.0;
+    let w = galley.size().x + pad * 2.0;
+    let h = 17.0;
+    let badge = egui::Rect::from_min_size(pos, egui::vec2(w, h));
+    let painter = ui.painter();
+    painter.rect_filled(badge, 5.0, theme::ACCENT_SOFT);
+    painter.text(
+        badge.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        font,
+        theme::ACCENT,
+    );
+    badge.max.x
+}
+
+/// Draws a quick-access tile (icon + label) and returns whether clicked.
+fn draw_quick_tile(ui: &mut egui::Ui, icon: &str, label: &str) -> bool {
+    let size = egui::vec2(210.0, 84.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let bg = if response.hovered() {
+        theme::ACCENT_SOFT
+    } else {
+        theme::CARD_BG
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 12.0, bg);
+    painter.rect_stroke(rect, 12.0, egui::Stroke::new(1.0_f32, theme::CARD_BORDER));
+
+    let icon_rect =
+        egui::Rect::from_min_size(rect.min + egui::vec2(18.0, 22.0), egui::vec2(40.0, 40.0));
+    painter.rect_filled(icon_rect, 8.0, theme::ACCENT_SOFT);
+    painter.text(
+        icon_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional(20.0),
+        theme::ACCENT,
+    );
+    painter.text(
+        rect.min + egui::vec2(70.0, 42.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(15.0),
+        theme::TEXT_MAIN,
+    );
+
+    ui.add_space(6.0);
+    response.clicked()
 }
 
 fn draw_file_card(ui: &mut egui::Ui, selected: &mut bool, found: &RecoveredFile) {
@@ -474,10 +660,8 @@ fn draw_folder_card(ui: &mut egui::Ui, name: &str, count: usize, size: u64) -> b
     let card_size = egui::vec2(140.0, 126.0);
     let mut clicked = false;
     ui.allocate_ui(card_size, |ui| {
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(124.0, 112.0),
-            egui::Sense::click(),
-        );
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(124.0, 112.0), egui::Sense::click());
         let bg = if response.hovered() {
             theme::ACCENT_SOFT
         } else {
@@ -533,7 +717,7 @@ fn draw_progress_track(ui: &mut egui::Ui, fraction: f32, width: f32) {
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 620.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([940.0, 640.0]),
         ..Default::default()
     };
 

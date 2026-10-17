@@ -210,7 +210,18 @@ fn process_record(record: &[u8], vol: &NtfsVolume, found: &Arc<Mutex<Vec<Recover
 
 fn read_partitions(file: &mut File) -> io::Result<Vec<Partition>> {
     let mbr = disk::read_at(file, 0, 512)?;
-    if mbr.len() < 512 || mbr[510] != 0x55 || mbr[511] != 0xAA {
+    if mbr.len() < 512 {
+        return Ok(Vec::new());
+    }
+
+    // A volume handle (e.g. `\\.\C:`) or a bare-volume image starts directly
+    // with the NTFS boot sector rather than a partition table, so treat the
+    // whole thing as one partition at offset 0.
+    if &mbr[3..11] == b"NTFS    " {
+        return Ok(vec![Partition { start: 0 }]);
+    }
+
+    if mbr[510] != 0x55 || mbr[511] != 0xAA {
         return Ok(Vec::new());
     }
 
