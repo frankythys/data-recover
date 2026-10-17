@@ -3,6 +3,7 @@
 mod disk;
 mod fat;
 mod ntfs;
+mod preview;
 mod theme;
 mod ui;
 
@@ -100,15 +101,14 @@ struct DataRecovererApp {
     expanded_years: HashSet<u16>,
     expanded_folders: HashSet<String>,
     open_category: Option<&'static str>,
-    /// Lazily decoded image thumbnails, keyed by file index. `None` means a
-    /// decode was attempted and failed (clusters reused, not an image, …).
-    previews: HashMap<usize, Option<egui::TextureHandle>>,
+    /// Image thumbnails, decoded in the background (keyed by file index).
+    previews: preview::PreviewLoader,
     /// (text, is_success) shown as a banner / in the action bar.
     message: Option<(String, bool)>,
 }
 
-impl Default for DataRecovererApp {
-    fn default() -> Self {
+impl DataRecovererApp {
+    fn new(ctx: &egui::Context) -> Self {
         Self {
             volumes: disk::list_volumes(),
             scan_source_path: None,
@@ -120,7 +120,7 @@ impl Default for DataRecovererApp {
             expanded_years: HashSet::new(),
             expanded_folders: HashSet::new(),
             open_category: None,
-            previews: HashMap::new(),
+            previews: preview::PreviewLoader::new(ctx),
             message: None,
         }
     }
@@ -163,7 +163,7 @@ impl DataRecovererApp {
         self.message = None;
         self.selected.clear();
         self.open_category = None;
-        self.previews.clear();
+        self.previews.reset();
         self.tree_sel = TreeSel::All;
         self.browse_tab = BrowseTab::Date;
         self.expanded_years.clear();
@@ -767,20 +767,16 @@ impl DataRecovererApp {
                 } else {
                     let source = self.scan_source_path.clone().unwrap_or_default();
                     let (_, width) = ui::grid_columns(ui.available_width() - 8.0, 160.0, 14.0);
+                    self.previews.begin_frame(ui.ctx());
                     ui.horizontal_wrapped(|ui| {
                         for &i in &visible {
                             let found = &found_snapshot[i];
                             let is_image = ntfs::category_for_name(&found.name) == "Fotos";
-                            let preview = if is_image {
-                                if !self.previews.contains_key(&i) {
-                                    let tex = load_preview(ui.ctx(), &source, found, i);
-                                    self.previews.insert(i, tex);
-                                }
-                                self.previews.get(&i).and_then(|t| t.clone())
-                            } else {
-                                None
-                            };
-                            ui::file_card(ui, width, &mut self.selected[i], found, preview.as_ref(), is_image);
+                            let thumb = if is_image { self.previews.thumb(i) } else { preview::Thumb::None };
+                            let on_screen = ui::file_card(ui, width, &mut self.selected[i], found, thumb);
+                            if is_image && on_screen {
+                                self.previews.request(i, &source, found);
+                            }
                         }
                     });
                 }
@@ -980,27 +976,6 @@ impl FolderTree {
     }
 }
 
-/// Reads a recovered image into memory and uploads a thumbnail texture.
-/// Returns `None` when the file is too large, unreadable, or not a decodable
-/// image (e.g. its clusters were already reused after deletion).
-fn load_preview(
-    ctx: &egui::Context,
-    source: &str,
-    rec: &RecoveredFile,
-    idx: usize,
-) -> Option<egui::TextureHandle> {
-    const MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
-    if rec.size == 0 || rec.size > MAX_PREVIEW_BYTES {
-        return None;
-    }
-    let bytes = ntfs::read_file_bytes(source, rec, MAX_PREVIEW_BYTES).ok()?;
-    let image = image::load_from_memory(&bytes).ok()?;
-    let thumb = image.thumbnail(256, 256).to_rgba8();
-    let size = [thumb.width() as usize, thumb.height() as usize];
-    let color = egui::ColorImage::from_rgba_unmultiplied(size, thumb.as_raw());
-    Some(ctx.load_texture(format!("preview_{idx}"), color, egui::TextureOptions::LINEAR))
-}
-
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1015,7 +990,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
-            let mut app = DataRecovererApp::default();
+            let mut app = DataRecovererApp::new(&cc.egui_ctx);
             // `data-recoverer --scan <pad>` opent meteen een scan van een schijf
             // of image, zonder bestandsdialoog (handig om te testen).
             let args: Vec<String> = std::env::args().collect();

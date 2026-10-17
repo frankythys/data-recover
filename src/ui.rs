@@ -523,9 +523,9 @@ pub fn file_card(
     width: f32,
     selected: &mut bool,
     rf: &RecoveredFile,
-    preview: Option<&egui::TextureHandle>,
-    image_attempted: bool,
-) {
+    thumb_state: crate::preview::Thumb<'_>,
+) -> bool {
+    use crate::preview::Thumb;
     let thumb_h = ((width - 16.0) * 0.70).round();
     let (rect, resp) = ui.allocate_exact_size(vec2(width, thumb_h + 80.0), Sense::click());
     if resp.clicked() {
@@ -535,10 +535,10 @@ pub fn file_card(
 
     let category = ntfs::category_for_name(&rf.name);
     let (glyph, color) = category_style(category);
-    let overwritten = image_attempted && preview.is_none();
+    let overwritten = matches!(thumb_state, Thumb::Failed);
     let thumb = Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(rect.width() - 16.0, thumb_h));
 
-    if let Some(tex) = preview {
+    if let Thumb::Image(tex) = thumb_state {
         // Cover-fit: crop the texture to the thumbnail's aspect ratio.
         let ts = tex.size_vec2();
         let (ta, ra) = (ts.x / ts.y.max(1.0), thumb.width() / thumb.height());
@@ -557,6 +557,10 @@ pub fn file_card(
         ui.painter().rect_filled(thumb, 7.0, theme::SUBTLE_BG);
         ui.painter().text(thumb.center() - vec2(0.0, 9.0), egui::Align2::CENTER_CENTER, icon::WARNING_CIRCLE, theme::icon(26.0), theme::TEXT_FAINT);
         ui.painter().text(thumb.center() + vec2(0.0, 18.0), egui::Align2::CENTER_CENTER, "Geen voorbeeld", theme::font(11.0), theme::TEXT_DIM);
+    } else if matches!(thumb_state, Thumb::Loading) {
+        ui.painter().rect_filled(thumb, 7.0, theme::tint(color, 0.08));
+        let spin = Rect::from_center_size(thumb.center(), vec2(22.0, 22.0));
+        egui::Spinner::new().size(22.0).color(color).paint_at(ui, spin);
     } else {
         let ext = std::path::Path::new(&rf.name)
             .extension()
@@ -595,5 +599,7 @@ pub fn file_card(
     if overwritten {
         tip.push_str("\n\nData mogelijk al overschreven – herstel kan onvolledig zijn.");
     }
+    let visible = ui.is_rect_visible(rect);
     resp.on_hover_text(tip);
+    visible
 }

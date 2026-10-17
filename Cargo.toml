@@ -19,3 +19,8 @@ features = [
     "Win32_System_IO",
     "Win32_System_Ioctl",
 ]
+
+# `cargo run` bouwt in debug; zonder dit decoderen foto-voorbeelden tientallen
+# keren trager. Alleen de afhankelijkheden worden geoptimaliseerd.
+[profile.dev.package."*"]
+opt-level = 3
