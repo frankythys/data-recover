@@ -222,9 +222,22 @@ impl DataRecovererApp {
 
             if let Some(i) = to_scan {
                 let vol = &self.volumes[i];
-                let path = vol.scan_path.clone();
-                let label = vol.display_name();
-                self.start_scan(path, label, ctx);
+                let fs = vol.filesystem.to_uppercase();
+                if !fs.is_empty() && fs != "NTFS" {
+                    self.message = Some((
+                        format!(
+                            "{} gebruikt {}. Deze versie ondersteunt alleen NTFS — \
+                             FAT32/exFAT (USB-sticks, SD-kaarten) volgt later.",
+                            vol.display_name(),
+                            vol.filesystem
+                        ),
+                        false,
+                    ));
+                } else {
+                    let path = vol.scan_path.clone();
+                    let label = vol.display_name();
+                    self.start_scan(path, label, ctx);
+                }
             } else if let Some(action) = quick {
                 self.handle_quick_action(action, ctx);
             }
@@ -443,6 +456,15 @@ impl DataRecovererApp {
                 });
             });
         });
+
+        if finished && found_snapshot.is_empty() && total_records == 0 {
+            ui.add_space(8.0);
+            ui.colored_label(
+                theme::TEXT_DIM,
+                "Geen NTFS-volume gevonden op deze bron. Momenteel wordt alleen NTFS \
+                 ondersteund — FAT32/exFAT (veel USB-sticks en SD-kaarten) volgt later.",
+            );
+        }
 
         if let Some((text, success)) = &self.message {
             ui.add_space(8.0);
