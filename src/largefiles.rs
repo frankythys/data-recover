@@ -1,12 +1,11 @@
-//! Read-only walk of a folder tree that finds the largest files and folders,
-//! plus the two actions the cleanup screen offers on a result: show it in
-//! Explorer and move it to the Recycle Bin.
+//! Read-only walk of a drive or folder that finds the user's own largest
+//! files, plus the two actions the cleanup screen offers on a result: show it
+//! in Explorer and move it to the Recycle Bin.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::ffi::OsString;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
 
@@ -19,18 +18,6 @@ pub struct LargeFile {
     pub modified: Option<SystemTime>,
 }
 
-/// One folder of the scanned tree. Sizes include all subfolders.
-#[derive(Debug, Clone)]
-pub struct DirNode {
-    /// Folder name; for the root node the full root path.
-    pub name: OsString,
-    pub parent: Option<usize>,
-    pub size: u64,
-    pub files: u64,
-    /// Indexes into [`CleanupResult::dirs`], largest first.
-    pub children: Vec<usize>,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct CleanupProgress {
     pub files_scanned: u64,
@@ -40,44 +27,16 @@ pub struct CleanupProgress {
 
 #[derive(Debug, Default)]
 pub struct CleanupResult {
-    /// Largest first.
+    /// The user's own files, largest first.
     pub files: Vec<LargeFile>,
-    /// Every scanned folder; index 0 is the root.
-    pub dirs: Vec<DirNode>,
     pub file_count: u64,
     pub total_bytes: u64,
     pub skipped_folders: u64,
 }
 
-impl CleanupResult {
-    /// Full path of folder `index`, rebuilt from the parent chain.
-    pub fn dir_path(&self, index: usize) -> PathBuf {
-        let mut names = Vec::new();
-        let mut cur = Some(index);
-        while let Some(i) = cur {
-            names.push(&self.dirs[i].name);
-            cur = self.dirs[i].parent;
-        }
-        names.iter().rev().collect()
-    }
-
-    /// Lowers the totals of folder `index` and its ancestors after a file
-    /// of `size` bytes was removed from it.
-    pub fn subtract_file(&mut self, index: usize, size: u64) {
-        let mut cur = Some(index);
-        while let Some(i) = cur {
-            let node = &mut self.dirs[i];
-            node.size = node.size.saturating_sub(size);
-            node.files = node.files.saturating_sub(1);
-            cur = node.parent;
-        }
-        self.total_bytes = self.total_bytes.saturating_sub(size);
-        self.file_count = self.file_count.saturating_sub(1);
-    }
-}
-
-/// Walks `root`, totals every folder and keeps the largest files of at
-/// least `min_size` bytes. Never modifies anything on disk.
+/// Walks `root` and keeps the largest files of at least `min_size` bytes
+/// that belong to the user (see [`is_system_or_app`]). Never modifies
+/// anything on disk.
 pub fn scan(
     root: &Path,
     min_size: u64,
@@ -90,17 +49,10 @@ pub fn scan(
     }
     let mut result = CleanupResult::default();
     let mut largest: BinaryHeap<Reverse<LargeFile>> = BinaryHeap::new();
-    let mut dirs = vec![DirNode {
-        name: root.as_os_str().to_owned(),
-        parent: None,
-        size: 0,
-        files: 0,
-        children: Vec::new(),
-    }];
-    let mut pending: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    let mut pending = vec![root.to_path_buf()];
     let mut last_report = Instant::now();
 
-    while let Some((dir, node)) = pending.pop() {
+    while let Some(dir) = pending.pop() {
         if cancel.load(Ordering::Relaxed) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "Scan gestopt"));
         }
@@ -115,10 +67,7 @@ pub fn scan(
                 continue;
             }
             if kind.is_dir() {
-                let child = dirs.len();
-                dirs.push(DirNode { name: entry.file_name(), parent: Some(node), size: 0, files: 0, children: Vec::new() });
-                dirs[node].children.push(child);
-                pending.push((entry.path(), child));
+                pending.push(entry.path());
                 continue;
             }
             let Ok(meta) = entry.metadata() else { continue };
@@ -128,12 +77,9 @@ pub fn scan(
             let size = meta.len();
             result.file_count += 1;
             result.total_bytes += size;
-            dirs[node].size += size;
-            dirs[node].files += 1;
             if size >= min_size {
                 let path = entry.path();
-                // Files Windows needs stay out of the "largest files" list.
-                if !is_protected(&path) {
+                if !is_system_or_app(&path) {
                     keep_largest(&mut largest, max_files, || LargeFile {
                         size,
                         path,
@@ -152,38 +98,8 @@ pub fn scan(
         }
     }
 
-    // A child always comes after its parent, so walking backwards adds each
-    // folder's finished total to its parent.
-    for i in (1..dirs.len()).rev() {
-        let (size, files, parent) = (dirs[i].size, dirs[i].files, dirs[i].parent.unwrap_or(0));
-        dirs[parent].size += size;
-        dirs[parent].files += files;
-    }
-    for i in 0..dirs.len() {
-        let mut children = std::mem::take(&mut dirs[i].children);
-        children.sort_by(|&a, &b| dirs[b].size.cmp(&dirs[a].size));
-        dirs[i].children = children;
-    }
     result.files = largest.into_sorted_vec().into_iter().map(|Reverse(f)| f).collect();
-    result.dirs = dirs;
     Ok(result)
-}
-
-/// Files directly inside `dir`, largest first (for the folder browser).
-pub fn list_files(dir: &Path) -> Vec<LargeFile> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut files: Vec<LargeFile> = entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|k| k.is_file()))
-        .filter_map(|e| {
-            let meta = e.metadata().ok()?;
-            takes_local_space(&meta).then(|| LargeFile { size: meta.len(), path: e.path(), modified: meta.modified().ok() })
-        })
-        .collect();
-    files.sort_by(|a, b| b.size.cmp(&a.size));
-    files
 }
 
 fn keep_largest(heap: &mut BinaryHeap<Reverse<LargeFile>>, max: usize, make: impl FnOnce() -> LargeFile) {
@@ -215,17 +131,38 @@ fn takes_local_space(_meta: &std::fs::Metadata) -> bool {
     true
 }
 
-/// Files Windows needs to run: the page, hibernation and swap files at a
-/// drive root, and everything in the Windows folder and the
-/// "System Volume Information" folder. These may never be removed.
-pub fn is_protected(path: &Path) -> bool {
-    let text = path.to_string_lossy().to_lowercase();
+/// Folder names that hold Windows or installed programs and their data.
+/// Removing files from these by hand breaks Windows or the program.
+const SYSTEM_AND_APP_FOLDERS: [&str; 9] = [
+    "windows",
+    "program files",
+    "program files (x86)",
+    "programdata",
+    "appdata",
+    "$recycle.bin",
+    "system volume information",
+    "recovery",
+    "$windows.~bt",
+];
+
+/// Whether `path` belongs to Windows or an installed program rather than to
+/// the user: the page/hibernation/swap files, anything inside one of
+/// [`SYSTEM_AND_APP_FOLDERS`], and program folders in the user profile whose
+/// name starts with a dot (`.ollama`, `.android`, `.gradle`, …). Such files
+/// are never listed and never removed.
+pub fn is_system_or_app(path: &Path) -> bool {
     let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let windows_dir = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()).to_lowercase();
-    let in_folder = |folder: &str| text.starts_with(&format!("{}\\", folder.trim_end_matches('\\')));
-    matches!(name.as_str(), "pagefile.sys" | "hiberfil.sys" | "swapfile.sys" | "dumpstack.log.tmp")
-        || in_folder(&windows_dir)
-        || text.contains("\\system volume information\\")
+    if matches!(name.as_str(), "pagefile.sys" | "hiberfil.sys" | "swapfile.sys" | "dumpstack.log.tmp") {
+        return true;
+    }
+    let Some(parent) = path.parent() else { return false };
+    parent.components().any(|c| match c {
+        Component::Normal(part) => {
+            let part = part.to_string_lossy().to_lowercase();
+            part.starts_with('.') || SYSTEM_AND_APP_FOLDERS.contains(&part.as_str())
+        }
+        _ => false,
+    })
 }
 
 /// A warning for files that should be cleaned up another way than by
@@ -268,6 +205,9 @@ pub fn move_to_recycle_bin(path: &Path) -> io::Result<bool> {
     };
     use windows::core::PCWSTR;
 
+    if is_system_or_app(path) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "systeem- of programmabestand, niet verwijderd"));
+    }
     // pFrom is a list of paths ending with an extra NUL.
     let from: Vec<u16> = path.as_os_str().encode_wide().chain([0, 0]).collect();
     // FOF_WANTNUKEWARNING: without it Windows silently deletes files that are
@@ -300,11 +240,15 @@ pub fn move_to_recycle_bin(_path: &Path) -> io::Result<bool> {
 mod tests {
     use super::*;
 
+    /// Test tree in a fresh folder at the root of the system drive. The temp
+    /// folder lives in AppData, which `is_system_or_app` hides, so the tests
+    /// cannot use it.
     struct TempTree(PathBuf);
 
     impl TempTree {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("dr_largefiles_{name}_{}", std::process::id()));
+            let base = std::env::var_os("SystemDrive").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:"));
+            let dir = base.join("\\").join(format!("dr_largefiles_{name}_{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
@@ -318,10 +262,6 @@ mod tests {
 
         fn scan(&self, min_size: u64, max_files: usize) -> CleanupResult {
             scan(&self.0, min_size, max_files, &AtomicBool::new(false), |_| {}).unwrap()
-        }
-
-        fn rel(&self, path: &Path) -> String {
-            path.strip_prefix(&self.0).unwrap().display().to_string()
         }
     }
 
@@ -361,62 +301,42 @@ mod tests {
     }
 
     #[test]
-    fn folder_sizes_include_subfolders() {
-        let t = TempTree::new("folders");
-        t.file("x/one.bin", 1000);
-        t.file("x/y/two.bin", 2000);
-        t.file("z/three.bin", 500);
-        t.file("rootfile.bin", 9000);
+    fn system_and_program_files_are_not_listed_but_counted() {
+        let t = TempTree::new("hidden");
+        t.file("film.mkv", 5000);
+        t.file("AppData/Local/model.bin", 9000);
+        t.file(".ollama/models/blob", 8000);
+        t.file("pagefile.sys", 7000);
 
-        let r = t.scan(0, MAX_FILE_RESULTS);
+        let r = t.scan(1000, MAX_FILE_RESULTS);
 
-        let root = &r.dirs[0];
-        assert_eq!((root.size, root.files), (12500, 4));
-        let kids: Vec<(String, u64, u64)> = root
-            .children
-            .iter()
-            .map(|&i| (t.rel(&r.dir_path(i)), r.dirs[i].size, r.dirs[i].files))
-            .collect();
-        assert_eq!(kids, [("x".to_string(), 3000, 2), ("z".to_string(), 500, 1)]);
-        let y = r.dirs[root.children[0]].children[0];
-        let y_rel = Path::new("x").join("y").display().to_string();
-        assert_eq!((t.rel(&r.dir_path(y)), r.dirs[y].size), (y_rel, 2000));
+        assert_eq!(names(&r), ["film.mkv"]);
+        assert_eq!(r.total_bytes, 29000);
     }
 
     #[test]
-    fn subtract_file_updates_folder_and_ancestors() {
-        let t = TempTree::new("subtract");
-        t.file("x/y/two.bin", 2000);
-        let mut r = t.scan(0, MAX_FILE_RESULTS);
-        let x = r.dirs[0].children[0];
-        let y = r.dirs[x].children[0];
-
-        r.subtract_file(y, 2000);
-
-        assert_eq!((r.dirs[y].size, r.dirs[x].size, r.dirs[0].size, r.total_bytes), (0, 0, 0, 0));
-    }
-
-    #[test]
-    fn list_files_returns_direct_files_largest_first() {
-        let t = TempTree::new("list");
-        t.file("a.bin", 10);
-        t.file("b.bin", 30);
-        t.file("sub/c.bin", 99);
-
-        let files = list_files(&t.0);
-
-        let got: Vec<(String, u64)> = files.iter().map(|f| (t.rel(&f.path), f.size)).collect();
-        assert_eq!(got, [("b.bin".to_string(), 30), ("a.bin".to_string(), 10)]);
-    }
-
-    #[test]
-    fn windows_system_files_are_protected() {
-        assert!(is_protected(Path::new(r"C:\pagefile.sys")));
-        assert!(is_protected(Path::new(r"D:\HIBERFIL.SYS")));
-        assert!(is_protected(Path::new(r"C:\Windows\System32\ntoskrnl.exe")));
-        assert!(is_protected(Path::new(r"C:\System Volume Information\x.dat")));
-        assert!(!is_protected(Path::new(r"C:\Users\frank\Downloads\film.mkv")));
-        assert!(!is_protected(Path::new(r"C:\WindowsApps\x.bin")));
+    fn recognises_system_and_program_locations() {
+        let hidden = [
+            r"C:\pagefile.sys",
+            r"D:\HIBERFIL.SYS",
+            r"C:\Windows\System32\ntoskrnl.exe",
+            r"C:\Program Files\App\app.exe",
+            r"C:\ProgramData\Docker\x.vhdx",
+            r"C:\Users\frank\AppData\Local\Docker\wsl\disk\docker_data.vhdx",
+            r"C:\Users\frank\.ollama\models\blobs\sha256-1",
+            r"C:\$Recycle.Bin\S-1-5\$R123.mkv",
+        ];
+        let shown = [
+            r"C:\Users\frank\Downloads\film.mkv",
+            r"C:\models\Qwen.gguf",
+            r"C:\Users\frank\Documents\WindowsBackup.zip",
+        ];
+        for p in hidden {
+            assert!(is_system_or_app(Path::new(p)), "{p} hoort verborgen te zijn");
+        }
+        for p in shown {
+            assert!(!is_system_or_app(Path::new(p)), "{p} hoort zichtbaar te zijn");
+        }
     }
 
     #[test]
@@ -447,6 +367,14 @@ mod tests {
         let err = scan(&t.0.join("bestaat-niet"), 0, 10, &AtomicBool::new(false), |_| {}).unwrap_err();
 
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn refuses_to_recycle_program_files() {
+        let err = move_to_recycle_bin(Path::new(r"C:\Users\x\AppData\Local\iets.bin")).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
     }
 
     /// Leaves a 10-byte file in the real Recycle Bin, so only on request:

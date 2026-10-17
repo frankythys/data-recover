@@ -3,6 +3,7 @@
 mod cleanup;
 mod disk;
 mod fat;
+mod junk;
 mod largefiles;
 mod ntfs;
 mod preview;
@@ -260,7 +261,7 @@ impl DataRecovererApp {
         ui.add_space(6.0);
         ui::sidebar_caption(ui, "Opruimen");
         let cleanup = matches!(self.screen, Screen::Cleanup);
-        if ui::nav_item(ui, icon::BROOM, "Grote bestanden", cleanup).clicked() {
+        if ui::nav_item(ui, icon::BROOM, "Schijf opruimen", cleanup).clicked() {
             self.screen = Screen::Cleanup;
         }
     }
@@ -912,7 +913,7 @@ impl eframe::App for DataRecovererApp {
                 )
                 .show(ctx, |ui| self.draw_action_bar(ui));
         }
-        if matches!(self.screen, Screen::Cleanup) && self.cleanup.has_results() {
+        if matches!(self.screen, Screen::Cleanup) && self.cleanup.has_action_bar() {
             egui::TopBottomPanel::bottom("cleanup_actions")
                 .exact_height(64.0)
                 .frame(
