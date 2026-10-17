@@ -25,6 +25,37 @@ fn u64le(b: &[u8], o: usize) -> u64 {
     ])
 }
 
+/// (year, month) from a FAT 16-bit date word (year since 1980, 4-bit month).
+fn fat_ymd(date_word: u16) -> (u16, u8) {
+    let year = 1980 + (date_word >> 9);
+    let month = ((date_word >> 5) & 0x0F) as u8;
+    if (1..=12).contains(&month) {
+        (year, month)
+    } else {
+        (0, 0)
+    }
+}
+
+/// (year, month) from an exFAT 32-bit DOS-style timestamp.
+fn exfat_ymd(ts: u32) -> (u16, u8) {
+    let year = 1980 + (ts >> 25) as u16;
+    let month = ((ts >> 21) & 0x0F) as u8;
+    if (1..=12).contains(&month) {
+        (year, month)
+    } else {
+        (0, 0)
+    }
+}
+
+/// Joins a parent folder path and a child name (`\` is the root).
+fn join_path(parent: &str, child: &str) -> String {
+    if parent == "\\" {
+        format!("\\{child}")
+    } else {
+        format!("{parent}\\{child}")
+    }
+}
+
 /// Recognises a FAT12/16/32 boot sector (used so a bare `\\.\D:` volume
 /// handle is scanned correctly). exFAT and NTFS are matched by their 8-byte
 /// OEM tag before this is consulted.
@@ -154,23 +185,23 @@ pub fn scan_fat(
     };
 
     let mut scanned: u64 = 0;
-    let mut stack: Vec<u32> = Vec::new();
+    let mut stack: Vec<(u32, String)> = Vec::new();
 
     // Root directory: a fixed region on FAT12/16, a cluster chain on FAT32.
     if kind == FatKind::F32 {
         if root_cluster >= 2 {
             let buf = read_chain(file, &fs, root_cluster)?;
-            process_dir(file, &fs, &buf, found, &mut stack, &mut scanned, cancel, on_progress);
+            process_dir(&fs, &buf, "\\", found, &mut stack, &mut scanned, cancel, on_progress);
         }
     } else {
         let root_off = part_off + (reserved + num_fats * fat_size) * bps;
         let buf = disk::read_at(file, root_off, (root_dir_sectors * bps) as usize)?;
-        process_dir(file, &fs, &buf, found, &mut stack, &mut scanned, cancel, on_progress);
+        process_dir(&fs, &buf, "\\", found, &mut stack, &mut scanned, cancel, on_progress);
     }
 
     // Subdirectories (always cluster chains in the data region).
     let mut visited: HashSet<u32> = HashSet::new();
-    while let Some(start) = stack.pop() {
+    while let Some((start, path)) = stack.pop() {
         if !visited.insert(start) || scanned > MAX_ENTRIES {
             continue;
         }
@@ -178,7 +209,7 @@ pub fn scan_fat(
             break;
         }
         let buf = read_chain(file, &fs, start)?;
-        process_dir(file, &fs, &buf, found, &mut stack, &mut scanned, cancel, on_progress);
+        process_dir(&fs, &buf, &path, found, &mut stack, &mut scanned, cancel, on_progress);
     }
 
     on_progress(ScanProgress {
@@ -190,18 +221,18 @@ pub fn scan_fat(
 
 /// Iterates one directory's 32-byte entries, collecting deleted files and
 /// queuing live subdirectories onto `stack`.
+#[allow(clippy::too_many_arguments)]
 fn process_dir(
-    file: &mut File,
     fs: &Fat,
     buf: &[u8],
+    path: &str,
     found: &std::sync::Mutex<Vec<RecoveredFile>>,
-    stack: &mut Vec<u32>,
+    stack: &mut Vec<(u32, String)>,
     scanned: &mut u64,
     cancel: &std::sync::atomic::AtomicBool,
     on_progress: &mut dyn FnMut(ScanProgress),
 ) {
     use std::sync::atomic::Ordering;
-    let _ = file;
     let mut lfn: Vec<Vec<u16>> = Vec::new();
     let mut i = 0usize;
     while i + 32 <= buf.len() {
@@ -231,16 +262,21 @@ fn process_dir(
             let name = assemble_name(&lfn, e);
             let (start_cl, size) = short_entry(e);
             if size > 0 && start_cl >= 2 && !name.is_empty() {
+                let (year, month) = fat_ymd(u16le(e, 24));
                 found.lock().unwrap().push(RecoveredFile {
                     name,
                     size: size as u64,
                     data: DataLocation::NonResident(vec![(fs.cluster_offset(start_cl), size as u64)]),
+                    path: path.to_string(),
+                    year,
+                    month,
                 });
             }
         } else if attr & 0x10 != 0 {
             let (start_cl, _) = short_entry(e);
             if start_cl >= 2 && e[0] != b'.' && stack.len() < MAX_DIR_CLUSTERS {
-                stack.push(start_cl);
+                let name = assemble_name(&lfn, e);
+                stack.push((start_cl, join_path(path, &name)));
             }
         }
         lfn.clear();
@@ -378,11 +414,11 @@ pub fn scan_exfat(
         cluster_heap_off_sector,
     };
 
-    let mut stack = vec![root_cluster];
+    let mut stack: Vec<(u32, String)> = vec![(root_cluster, "\\".to_string())];
     let mut visited: HashSet<u32> = HashSet::new();
     let mut scanned: u64 = 0;
 
-    while let Some(start) = stack.pop() {
+    while let Some((start, dir_path)) = stack.pop() {
         if !visited.insert(start) {
             continue;
         }
@@ -412,6 +448,7 @@ pub fn scan_exfat(
                 let file_attr = u16le(&buf, i + 4);
                 let is_dir = file_attr & 0x10 != 0;
                 let is_deleted = t & 0x80 == 0;
+                let (year, month) = exfat_ymd(u32le(&buf, i + 0x0C));
 
                 // Stream extension entry follows (0xC0 / 0x40).
                 let stream_at = i + 32;
@@ -435,10 +472,13 @@ pub fn scan_exfat(
                             name,
                             size: data_length,
                             data: DataLocation::NonResident(runs),
+                            path: dir_path.clone(),
+                            year,
+                            month,
                         });
                     } else if is_dir && !is_deleted && first_cluster >= 2 {
                         if stack.len() < MAX_DIR_CLUSTERS {
-                            stack.push(first_cluster);
+                            stack.push((first_cluster, join_path(&dir_path, &name)));
                         }
                     }
                 }

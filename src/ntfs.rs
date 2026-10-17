@@ -25,6 +25,41 @@ pub struct RecoveredFile {
     pub name: String,
     pub size: u64,
     pub data: DataLocation,
+    /// Original folder, e.g. `\DCIM\100CANON` (`\` for the volume root).
+    pub path: String,
+    /// Last-modified year, or 0 when unknown.
+    pub year: u16,
+    /// Last-modified month 1–12, or 0 when unknown.
+    pub month: u8,
+}
+
+/// Converts a Windows FILETIME (100 ns ticks since 1601-01-01) to a
+/// (year, month) pair, or (0, 0) when the value is empty/implausible.
+pub fn filetime_to_ym(ft: u64) -> (u16, u8) {
+    if ft == 0 {
+        return (0, 0);
+    }
+    // FILETIME epoch (1601) to Unix epoch (1970) is 11644473600 seconds.
+    let secs = (ft / 10_000_000) as i64 - 11_644_473_600;
+    ymd_from_unix(secs)
+}
+
+/// Civil (year, month) from a Unix timestamp (Howard Hinnant's algorithm).
+pub fn ymd_from_unix(secs: i64) -> (u16, u8) {
+    let days = secs.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    if !(1..=9999).contains(&year) {
+        return (0, 0);
+    }
+    (year as u16, m as u8)
 }
 
 pub struct ScanProgress {
@@ -133,6 +168,8 @@ pub fn scan_drive(
         let total_records: u64 =
             mft_runs.iter().map(|(_, len)| len).sum::<u64>() / vol.record_size;
 
+        let mut path_cache: std::collections::HashMap<u64, (String, u64)> =
+            std::collections::HashMap::new();
         let mut record_index: u64 = 0;
         for (run_offset, run_len) in &mft_runs {
             let mut pos = *run_offset;
@@ -161,7 +198,14 @@ pub fn scan_drive(
                     record_index += 1;
 
                     if &record[0..4] == FILE_SIGNATURE && apply_fixup(&mut record) {
-                        process_record(&record, &vol, found);
+                        process_record(
+                            &mut file,
+                            &vol,
+                            &mft_runs,
+                            &record,
+                            found,
+                            &mut path_cache,
+                        );
                     }
                 }
 
@@ -177,7 +221,14 @@ pub fn scan_drive(
     Ok(())
 }
 
-fn process_record(record: &[u8], vol: &NtfsVolume, found: &Arc<Mutex<Vec<RecoveredFile>>>) {
+fn process_record(
+    file: &mut File,
+    vol: &NtfsVolume,
+    mft_runs: &[(u64, u64)],
+    record: &[u8],
+    found: &Arc<Mutex<Vec<RecoveredFile>>>,
+    cache: &mut std::collections::HashMap<u64, (String, u64)>,
+) {
     let flags = u16::from_le_bytes(record[0x16..0x18].try_into().unwrap());
     let in_use = flags & FLAG_IN_USE != 0;
     let is_directory = flags & FLAG_DIRECTORY != 0;
@@ -187,14 +238,13 @@ fn process_record(record: &[u8], vol: &NtfsVolume, found: &Arc<Mutex<Vec<Recover
 
     let attrs = parse_attributes(record);
 
-    let name = attrs
+    let Some(fname) = attrs
         .iter()
         .filter(|a| a.type_id == ATTR_FILE_NAME)
         .filter_map(|a| parse_file_name(&a.resident_data))
         .max_by_key(|f| if f.namespace == 2 { 0 } else { 1 })
-        .map(|f| f.name);
-
-    let Some(name) = name.filter(|n| !n.is_empty()) else {
+        .filter(|f| !f.name.is_empty())
+    else {
         return;
     };
 
@@ -220,7 +270,17 @@ fn process_record(record: &[u8], vol: &NtfsVolume, found: &Arc<Mutex<Vec<Recover
         DataLocation::Resident(data_attr.resident_data.clone())
     };
 
-    found.lock().unwrap().push(RecoveredFile { name, size, data });
+    let path = resolve_path(file, vol, mft_runs, fname.parent_ref, cache);
+    let (year, month) = filetime_to_ym(fname.modified);
+
+    found.lock().unwrap().push(RecoveredFile {
+        name: fname.name,
+        size,
+        data,
+        path,
+        year,
+        month,
+    });
 }
 
 fn read_partitions(file: &mut File) -> io::Result<Vec<Partition>> {
@@ -534,12 +594,18 @@ fn resolve_runs(raw_runs: &[(i64, u64)], cluster_size: u64, partition_start: u64
 struct FileNameAttr {
     name: String,
     namespace: u8,
+    /// MFT record number of the containing directory.
+    parent_ref: u64,
+    /// Last-modified FILETIME.
+    modified: u64,
 }
 
 fn parse_file_name(data: &[u8]) -> Option<FileNameAttr> {
     if data.len() < 66 {
         return None;
     }
+    let parent_ref = u64::from_le_bytes(data[0..8].try_into().unwrap()) & 0x0000_FFFF_FFFF_FFFF;
+    let modified = u64::from_le_bytes(data[16..24].try_into().unwrap());
     let name_len = data[64] as usize;
     let namespace = data[65];
     let name_bytes = data.get(66..66 + name_len * 2)?;
@@ -550,7 +616,84 @@ fn parse_file_name(data: &[u8]) -> Option<FileNameAttr> {
     Some(FileNameAttr {
         name: String::from_utf16_lossy(&utf16),
         namespace,
+        parent_ref,
+        modified,
     })
+}
+
+/// Byte offset of MFT record `n` within the (possibly fragmented) $MFT,
+/// using the resolved run map.
+fn record_offset(mft_runs: &[(u64, u64)], record_size: u64, n: u64) -> Option<u64> {
+    let mut base = 0u64;
+    for (off, len) in mft_runs {
+        let recs = len / record_size;
+        if n < base + recs {
+            return Some(off + (n - base) * record_size);
+        }
+        base += recs;
+    }
+    None
+}
+
+/// Reads record `n`'s best $FILE_NAME, returning (name, parent record).
+fn read_name_entry(
+    file: &mut File,
+    vol: &NtfsVolume,
+    mft_runs: &[(u64, u64)],
+    n: u64,
+) -> Option<(String, u64)> {
+    let off = record_offset(mft_runs, vol.record_size, n)?;
+    let mut rec = disk::read_at(file, off, vol.record_size as usize).ok()?;
+    if rec.len() < vol.record_size as usize || &rec[0..4] != FILE_SIGNATURE {
+        return None;
+    }
+    apply_fixup(&mut rec);
+    let best = parse_attributes(&rec)
+        .iter()
+        .filter(|a| a.type_id == ATTR_FILE_NAME)
+        .filter_map(|a| parse_file_name(&a.resident_data))
+        .max_by_key(|f| if f.namespace == 2 { 0 } else { 1 })?;
+    Some((best.name, best.parent_ref))
+}
+
+/// Builds the folder path of a file whose parent directory is record
+/// `parent_ref`, walking up to the volume root (record 5) with a cache.
+fn resolve_path(
+    file: &mut File,
+    vol: &NtfsVolume,
+    mft_runs: &[(u64, u64)],
+    parent_ref: u64,
+    cache: &mut std::collections::HashMap<u64, (String, u64)>,
+) -> String {
+    const ROOT: u64 = 5;
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = parent_ref;
+    let mut depth = 0;
+    while cur != ROOT && cur > ROOT && depth < 64 {
+        let entry = if let Some(v) = cache.get(&cur) {
+            v.clone()
+        } else {
+            let v = read_name_entry(file, vol, mft_runs, cur).unwrap_or_else(|| ("?".into(), ROOT));
+            cache.insert(cur, v.clone());
+            v
+        };
+        let (name, parent) = entry;
+        if name.is_empty() {
+            break;
+        }
+        parts.push(name);
+        if parent == cur {
+            break;
+        }
+        cur = parent;
+        depth += 1;
+    }
+    parts.reverse();
+    if parts.is_empty() {
+        "\\".to_string()
+    } else {
+        format!("\\{}", parts.join("\\"))
+    }
 }
 
 /// Category used to group files in the results view and as the subfolder
