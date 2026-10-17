@@ -18,6 +18,7 @@ features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Ioctl",
+    "Win32_UI_Shell",
 ]
 
 # `cargo run` bouwt in debug; zonder dit decoderen foto-voorbeelden tientallen

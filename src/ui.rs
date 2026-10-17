@@ -187,6 +187,22 @@ pub fn primary_icon_button(glyph: &str, text: &str) -> egui::Button<'static> {
         .rounding(egui::Rounding::same(8.0))
 }
 
+/// Filled red button with a leading icon, for removing things.
+pub fn danger_icon_button(glyph: &str, text: &str) -> egui::Button<'static> {
+    egui::Button::new(icon_text_job(glyph, text, 14.0, Color32::WHITE))
+        .fill(theme::DANGER)
+        .stroke(Stroke::NONE)
+        .rounding(egui::Rounding::same(8.0))
+}
+
+/// White outlined button with a leading icon.
+pub fn secondary_icon_button(glyph: &str, text: &str) -> egui::Button<'static> {
+    egui::Button::new(icon_text_job(glyph, text, 14.0, theme::TEXT_MAIN))
+        .fill(theme::CARD_BG)
+        .stroke(Stroke::new(1.0_f32, theme::CARD_BORDER))
+        .rounding(egui::Rounding::same(8.0))
+}
+
 /// Square icon-only button with a tooltip.
 pub fn icon_button(ui: &mut Ui, glyph: &str, tooltip: &str) -> Response {
     ui.add(

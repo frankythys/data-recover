@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cleanup;
 mod disk;
 mod fat;
+mod largefiles;
 mod ntfs;
 mod preview;
 mod theme;
@@ -21,6 +23,7 @@ use ui::ARROW_W;
 enum Screen {
     Home,
     Browse,
+    Cleanup,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -105,6 +108,8 @@ struct DataRecovererApp {
     previews: preview::PreviewLoader,
     /// (text, is_success) shown as a banner / in the action bar.
     message: Option<(String, bool)>,
+    /// "Grote bestanden" screen; keeps its scan when switching screens.
+    cleanup: cleanup::CleanupScreen,
 }
 
 impl DataRecovererApp {
@@ -122,6 +127,7 @@ impl DataRecovererApp {
             open_category: None,
             previews: preview::PreviewLoader::new(ctx),
             message: None,
+            cleanup: cleanup::CleanupScreen::new(),
         }
     }
 }
@@ -247,7 +253,16 @@ impl DataRecovererApp {
         ui::logo(ui);
         ui.add_space(6.0);
         ui::sidebar_caption(ui, "Herstel");
-        ui::nav_item(ui, icon::HARD_DRIVES, "Schijven & locaties", true);
+        let home = matches!(self.screen, Screen::Home);
+        if ui::nav_item(ui, icon::HARD_DRIVES, "Schijven & locaties", home).clicked() {
+            self.screen = Screen::Home;
+        }
+        ui.add_space(6.0);
+        ui::sidebar_caption(ui, "Opruimen");
+        let cleanup = matches!(self.screen, Screen::Cleanup);
+        if ui::nav_item(ui, icon::BROOM, "Grote bestanden", cleanup).clicked() {
+            self.screen = Screen::Cleanup;
+        }
     }
 
     /// Left panel in Browse mode: the "Opnamedatum" / "Oorspronkelijke map"
@@ -882,7 +897,7 @@ impl eframe::App for DataRecovererApp {
                     .stroke(egui::Stroke::new(1.0_f32, theme::CARD_BORDER)),
             )
             .show(ctx, |ui| match self.screen {
-                Screen::Home => self.draw_sidebar_home(ui),
+                Screen::Home | Screen::Cleanup => self.draw_sidebar_home(ui),
                 Screen::Browse => self.draw_browse_tree(ui),
             });
 
@@ -897,6 +912,17 @@ impl eframe::App for DataRecovererApp {
                 )
                 .show(ctx, |ui| self.draw_action_bar(ui));
         }
+        if matches!(self.screen, Screen::Cleanup) && self.cleanup.has_results() {
+            egui::TopBottomPanel::bottom("cleanup_actions")
+                .exact_height(64.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::CARD_BG)
+                        .stroke(egui::Stroke::new(1.0_f32, theme::CARD_BORDER))
+                        .inner_margin(egui::Margin::symmetric(24.0, 0.0)),
+                )
+                .show(ctx, |ui| self.cleanup.draw_action_bar(ui));
+        }
 
         egui::CentralPanel::default()
             .frame(
@@ -907,6 +933,7 @@ impl eframe::App for DataRecovererApp {
             .show(ctx, |ui| match self.screen {
                 Screen::Home => self.draw_home(ui, ctx),
                 Screen::Browse => self.draw_browse(ui),
+                Screen::Cleanup => self.cleanup.draw(ui, &self.volumes),
             });
     }
 }
