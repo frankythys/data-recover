@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod disk;
+mod fat;
 mod ntfs;
 mod theme;
 
@@ -223,11 +224,11 @@ impl DataRecovererApp {
             if let Some(i) = to_scan {
                 let vol = &self.volumes[i];
                 let fs = vol.filesystem.to_uppercase();
-                if !fs.is_empty() && fs != "NTFS" {
+                let supported = matches!(fs.as_str(), "" | "NTFS" | "FAT32" | "EXFAT");
+                if !supported {
                     self.message = Some((
                         format!(
-                            "{} gebruikt {}. Deze versie ondersteunt alleen NTFS — \
-                             FAT32/exFAT (USB-sticks, SD-kaarten) volgt later.",
+                            "{} gebruikt {}. Ondersteund worden NTFS, FAT32 en exFAT.",
                             vol.display_name(),
                             vol.filesystem
                         ),
@@ -436,7 +437,7 @@ impl DataRecovererApp {
                         ui.colored_label(
                             theme::TEXT_DIM,
                             format!(
-                                "{source_label} — {records_scanned}/{total_records} MFT-records — Duur: {elapsed_secs}s"
+                                "{source_label} — {records_scanned}/{total_records} records — Duur: {elapsed_secs}s"
                             ),
                         );
                         if !finished && ui.add(theme::outline_button("Stop")).clicked() {
@@ -461,8 +462,8 @@ impl DataRecovererApp {
             ui.add_space(8.0);
             ui.colored_label(
                 theme::TEXT_DIM,
-                "Geen NTFS-volume gevonden op deze bron. Momenteel wordt alleen NTFS \
-                 ondersteund — FAT32/exFAT (veel USB-sticks en SD-kaarten) volgt later.",
+                "Geen ondersteund bestandssysteem gevonden op deze bron. \
+                 Ondersteund worden NTFS, FAT32 en exFAT.",
             );
         }
 

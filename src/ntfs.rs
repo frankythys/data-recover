@@ -68,6 +68,21 @@ pub fn scan_drive(
         if cancel.load(Ordering::Relaxed) {
             break;
         }
+
+        // Dispatch per file system. FAT32/exFAT use their own walkers; NTFS
+        // falls through to the Master File Table scan below.
+        let boot = disk::read_at(&mut file, part.start, 512)?;
+        if boot.len() >= 512 {
+            if &boot[3..11] == b"EXFAT   " {
+                crate::fat::scan_exfat(&mut file, part.start, cancel, found, &mut on_progress)?;
+                continue;
+            }
+            if crate::fat::is_fat32_boot(&boot) {
+                crate::fat::scan_fat32(&mut file, part.start, cancel, found, &mut on_progress)?;
+                continue;
+            }
+        }
+
         let Some(vol) = read_ntfs_boot_sector(&mut file, part.start)? else {
             continue;
         };
@@ -214,10 +229,10 @@ fn read_partitions(file: &mut File) -> io::Result<Vec<Partition>> {
         return Ok(Vec::new());
     }
 
-    // A volume handle (e.g. `\\.\C:`) or a bare-volume image starts directly
-    // with the NTFS boot sector rather than a partition table, so treat the
-    // whole thing as one partition at offset 0.
-    if &mbr[3..11] == b"NTFS    " {
+    // A volume handle (e.g. `\\.\D:`) or a bare-volume image starts directly
+    // with the file-system boot sector rather than a partition table, so
+    // treat the whole thing as one partition at offset 0.
+    if &mbr[3..11] == b"NTFS    " || &mbr[3..11] == b"EXFAT   " || crate::fat::is_fat32_boot(&mbr) {
         return Ok(vec![Partition { start: 0 }]);
     }
 
