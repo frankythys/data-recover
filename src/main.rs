@@ -22,6 +22,7 @@ enum Screen {
 struct ScanHandle {
     source_label: String,
     cancel: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     progress: Arc<Mutex<ScanProgress>>,
     found: Arc<Mutex<Vec<RecoveredFile>>>,
     done_rx: Receiver<io::Result<()>>,
@@ -61,6 +62,7 @@ impl Default for DataRecovererApp {
 impl DataRecovererApp {
     fn start_scan(&mut self, path: String, label: String, ctx: &egui::Context) {
         let cancel = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Mutex::new(ScanProgress {
             records_scanned: 0,
             total_records: 0,
@@ -69,6 +71,7 @@ impl DataRecovererApp {
         let (tx, rx) = channel();
 
         let thread_cancel = cancel.clone();
+        let thread_paused = paused.clone();
         let thread_progress = progress.clone();
         let thread_found = found.clone();
         let thread_ctx = ctx.clone();
@@ -76,6 +79,13 @@ impl DataRecovererApp {
 
         std::thread::spawn(move || {
             let result = ntfs::scan_drive(&thread_path, &thread_cancel, &thread_found, |p| {
+                // The scan reports progress frequently; block here while paused
+                // so the worker stops touching the disk until resumed.
+                while thread_paused.load(Ordering::Relaxed)
+                    && !thread_cancel.load(Ordering::Relaxed)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                }
                 *thread_progress.lock().unwrap() = p;
                 thread_ctx.request_repaint();
             });
@@ -91,6 +101,7 @@ impl DataRecovererApp {
         self.scan = Some(ScanHandle {
             source_label: label,
             cancel,
+            paused,
             progress,
             found,
             done_rx: rx,
@@ -303,6 +314,7 @@ impl DataRecovererApp {
         }
 
         let cancel = scan.cancel.clone();
+        let paused_flag = scan.paused.clone();
         let source_label = scan.source_label.clone();
         let finished = scan.finished;
         let elapsed_secs = scan.started_at.elapsed().as_secs();
@@ -402,7 +414,17 @@ impl DataRecovererApp {
             });
 
         ui.add_space(12.0);
+        let is_paused = paused_flag.load(Ordering::Relaxed);
         theme::card_frame().show(ui, |ui| {
+            // Live ticker of the file currently being recovered.
+            if !finished {
+                let current = found_snapshot
+                    .last()
+                    .map(|f| f.name.as_str())
+                    .unwrap_or("…");
+                ui.colored_label(theme::TEXT_DIM, format!("Scannen: {current}"));
+                ui.add_space(6.0);
+            }
             draw_progress_track(ui, fraction, ui.available_width());
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -423,8 +445,10 @@ impl DataRecovererApp {
                     ui.horizontal(|ui| {
                         let status_text = if finished {
                             "Scan voltooid"
+                        } else if is_paused {
+                            "Gepauzeerd"
                         } else {
-                            "Snel scannen"
+                            "Bezig met scannen"
                         };
                         ui.strong(status_text);
                         ui.label(", bestanden gevonden:");
@@ -441,8 +465,14 @@ impl DataRecovererApp {
                                 "{source_label} — {records_scanned}/{total_records} records — Duur: {elapsed_secs}s"
                             ),
                         );
-                        if !finished && ui.add(theme::outline_button("Stop")).clicked() {
-                            cancel.store(true, Ordering::Relaxed);
+                        if !finished {
+                            let label = if is_paused { "▶ Hervatten" } else { "⏸ Pauze" };
+                            if ui.add(theme::outline_button(label)).clicked() {
+                                paused_flag.store(!is_paused, Ordering::Relaxed);
+                            }
+                            if ui.add(theme::outline_button("⏹ Stop")).clicked() {
+                                cancel.store(true, Ordering::Relaxed);
+                            }
                         }
                     });
                 });
