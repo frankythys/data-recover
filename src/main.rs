@@ -4,8 +4,10 @@ mod disk;
 mod fat;
 mod ntfs;
 mod theme;
+mod ui;
 
 use disk::{DriveKind, VolumeInfo};
+use egui_phosphor::regular as icon;
 use ntfs::{RecoveredFile, ScanProgress};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
@@ -13,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use ui::ARROW_W;
 
 enum Screen {
     Home,
@@ -53,10 +56,10 @@ impl TreeSel {
         }
     }
 
-    /// Short Dutch description of the active filter, for the heading.
+    /// Short Dutch description of the active filter, for the breadcrumb.
     fn describe(&self) -> String {
         match self {
-            TreeSel::All => String::new(),
+            TreeSel::All => "Alle bestanden".to_string(),
             TreeSel::Year(0) => "Onbekende datum".to_string(),
             TreeSel::Year(y) => y.to_string(),
             TreeSel::YearMonth(y, m) => {
@@ -82,6 +85,7 @@ struct ScanHandle {
     found: Arc<Mutex<Vec<RecoveredFile>>>,
     done_rx: Receiver<io::Result<()>>,
     started_at: Instant,
+    finished_after: Option<u64>,
     finished: bool,
 }
 
@@ -99,7 +103,7 @@ struct DataRecovererApp {
     /// Lazily decoded image thumbnails, keyed by file index. `None` means a
     /// decode was attempted and failed (clusters reused, not an image, …).
     previews: HashMap<usize, Option<egui::TextureHandle>>,
-    /// (text, is_success) shown at the bottom of a screen.
+    /// (text, is_success) shown as a banner / in the action bar.
     message: Option<(String, bool)>,
 }
 
@@ -173,43 +177,85 @@ impl DataRecovererApp {
             found,
             done_rx: rx,
             started_at: Instant::now(),
+            finished_after: None,
             finished: false,
         });
         self.screen = Screen::Browse;
     }
 
-    fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
-        draw_logo(ui);
+    /// Picks up the scan thread's result once it finishes.
+    fn poll_scan(&mut self) {
+        let Some(scan) = self.scan.as_mut() else {
+            return;
+        };
+        if scan.finished {
+            return;
+        }
+        if let Ok(result) = scan.done_rx.try_recv() {
+            scan.finished = true;
+            scan.finished_after = Some(scan.started_at.elapsed().as_secs());
+            if let Err(e) = result {
+                let msg = if e.kind() == io::ErrorKind::PermissionDenied {
+                    "Toegang geweigerd. Start Data Recoverer als administrator \
+                     (rechtermuisknop → Als administrator uitvoeren)."
+                        .to_string()
+                } else {
+                    format!("Scan mislukt: {e}")
+                };
+                self.message = Some((msg, false));
+            }
+        }
+    }
 
-        ui.add_space(24.0);
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            ui.label(egui::RichText::new("HERSTEL").size(11.0).color(theme::TEXT_DIM));
-        });
-        ui.add_space(4.0);
+    fn leave_browse(&mut self) {
+        if let Some(scan) = &self.scan {
+            scan.cancel.store(true, Ordering::Relaxed);
+        }
+        self.screen = Screen::Home;
+        self.scan = None;
+        self.message = None;
+    }
 
-        let frame = egui::Frame::none()
-            .fill(theme::ACCENT_SOFT)
-            .rounding(egui::Rounding::same(8.0))
-            .inner_margin(egui::Margin::symmetric(16.0, 10.0));
-        ui.horizontal(|ui| {
-            ui.add_space(10.0);
-            frame.show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new("Schijven & locaties")
-                        .color(theme::ACCENT)
-                        .strong(),
-                );
-            });
-        });
+    /// Whether file `rf` is part of the current view (tree filter, opened
+    /// category, or everything).
+    fn in_view(&self, rf: &RecoveredFile) -> bool {
+        if self.tree_sel != TreeSel::All {
+            self.tree_sel.matches(rf)
+        } else if let Some(cat) = self.open_category {
+            ntfs::category_for_name(&rf.name) == cat
+        } else {
+            true
+        }
+    }
+
+    fn view_title(&self) -> String {
+        if self.tree_sel != TreeSel::All {
+            self.tree_sel.describe()
+        } else if let Some(cat) = self.open_category {
+            cat.to_string()
+        } else {
+            "Alle bestanden".to_string()
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Sidebar
+    // -----------------------------------------------------------------------
+
+    fn draw_sidebar_home(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui::logo(ui);
+        ui.add_space(6.0);
+        ui::sidebar_caption(ui, "Herstel");
+        ui::nav_item(ui, icon::HARD_DRIVES, "Schijven & locaties", true);
     }
 
     /// Left panel in Browse mode: the "Opnamedatum" / "Oorspronkelijke map"
-    /// tabs and a tree that filters the file grid. Rows are painted at the
-    /// panel's current width, so nothing overflows when the panel is narrow.
+    /// tabs and a tree that filters the file grid.
     fn draw_browse_tree(&mut self, ui: &mut egui::Ui) {
-        draw_logo(ui);
-        ui.add_space(14.0);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui::logo(ui);
+        ui.add_space(4.0);
 
         let tab = self.browse_tab;
         let Some(scan) = self.scan.as_ref() else {
@@ -250,28 +296,30 @@ impl DataRecovererApp {
         let current = self.tree_sel.clone();
 
         egui::Frame::none()
-            .inner_margin(egui::Margin::symmetric(10.0, 0.0))
+            .inner_margin(egui::Margin::symmetric(12.0, 0.0))
             .show(ui, |ui| {
                 let active = if tab == BrowseTab::Date { 0 } else { 1 };
-                if let Some(i) = segmented_tabs(ui, ["Opnamedatum", "Oorspronkelijke map"], active) {
+                if let Some(i) = ui::segmented_tabs(ui, ["Opnamedatum", "Oorspronkelijke map"], active) {
                     new_tab = Some(if i == 0 { BrowseTab::Date } else { BrowseTab::Folder });
                 }
-                ui.add_space(8.0);
+                ui.add_space(10.0);
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if tree_row(ui, ARROW_W, None, "Alle data", total, current == TreeSel::All).0 {
+                        let all = current == TreeSel::All;
+                        if ui::tree_row(ui, ARROW_W, None, Some(icon::STACK), "Alle data", total, all).0 {
                             new_sel = Some(TreeSel::All);
                         }
                         match tab {
                             BrowseTab::Date => {
                                 for (&y, (ycount, months)) in years.iter().rev() {
                                     let is_exp = self.expanded_years.contains(&y);
-                                    let (clicked, arrow) = tree_row(
+                                    let (clicked, arrow) = ui::tree_row(
                                         ui,
                                         0.0,
                                         Some(is_exp),
+                                        Some(icon::CALENDAR_BLANK),
                                         &y.to_string(),
                                         *ycount,
                                         current == TreeSel::Year(y),
@@ -288,7 +336,7 @@ impl DataRecovererApp {
                                                 .copied()
                                                 .unwrap_or("?");
                                             let sel = current == TreeSel::YearMonth(y, m);
-                                            if tree_row(ui, 2.0 * ARROW_W, None, label, mc, sel).0 {
+                                            if ui::tree_row(ui, ARROW_W + 22.0, None, None, label, mc, sel).0 {
                                                 new_sel = Some(TreeSel::YearMonth(y, m));
                                             }
                                         }
@@ -296,8 +344,16 @@ impl DataRecovererApp {
                                 }
                                 if unknown_date > 0 {
                                     let sel = current == TreeSel::Year(0);
-                                    if tree_row(ui, ARROW_W, None, "Onbekende datum", unknown_date, sel).0
-                                    {
+                                    let row = ui::tree_row(
+                                        ui,
+                                        ARROW_W,
+                                        None,
+                                        Some(icon::CLOCK),
+                                        "Onbekende datum",
+                                        unknown_date,
+                                        sel,
+                                    );
+                                    if row.0 {
                                         new_sel = Some(TreeSel::Year(0));
                                     }
                                 }
@@ -305,7 +361,16 @@ impl DataRecovererApp {
                             BrowseTab::Folder => {
                                 if let Some(&n) = folder_files.get("\\") {
                                     let sel = current == TreeSel::RootFiles;
-                                    if tree_row(ui, ARROW_W, None, "Hoofdmap (losse bestanden)", n, sel).0 {
+                                    let row = ui::tree_row(
+                                        ui,
+                                        ARROW_W,
+                                        None,
+                                        Some(icon::FOLDER_SIMPLE),
+                                        "Hoofdmap (losse bestanden)",
+                                        n,
+                                        sel,
+                                    );
+                                    if row.0 {
                                         new_sel = Some(TreeSel::RootFiles);
                                     }
                                 }
@@ -348,92 +413,103 @@ impl DataRecovererApp {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Home
+    // -----------------------------------------------------------------------
+
     fn draw_home(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.heading("Kies een locatie om het herstel te starten");
-            ui.add_space(6.0);
-            if ui
-                .add(theme::outline_button("⟳"))
-                .on_hover_text("Opnieuw zoeken naar schijven")
-                .clicked()
-            {
-                self.volumes = disk::list_volumes();
-            }
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.heading("Kies een locatie om het herstel te starten");
+                ui.label(
+                    egui::RichText::new("Selecteer een schijf of image om verwijderde bestanden te zoeken.")
+                        .color(theme::TEXT_DIM),
+                );
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                if ui::icon_button(ui, icon::ARROW_CLOCKWISE, "Opnieuw zoeken naar schijven").clicked() {
+                    self.volumes = disk::list_volumes();
+                }
+            });
         });
-        ui.add_space(18.0);
+        ui.add_space(14.0);
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            let internal: Vec<usize> = self
-                .volumes
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| v.kind == DriveKind::Internal)
-                .map(|(i, _)| i)
-                .collect();
-            let external: Vec<usize> = self
-                .volumes
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| v.kind == DriveKind::External)
-                .map(|(i, _)| i)
-                .collect();
+        if let Some((text, success)) = self.message.clone() {
+            let (glyph, color) = if success {
+                (icon::CHECK_CIRCLE, theme::SUCCESS)
+            } else {
+                (icon::INFO, theme::ACCENT)
+            };
+            egui::Frame::none()
+                .fill(theme::tint(color, 0.10))
+                .rounding(egui::Rounding::same(8.0))
+                .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(glyph).font(theme::icon(16.0)).color(color));
+                        ui.label(egui::RichText::new(text).color(theme::TEXT_MAIN));
+                    });
+                });
+            ui.add_space(14.0);
+        }
 
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(14.0, 14.0);
+            let internal: Vec<usize> = (0..self.volumes.len())
+                .filter(|&i| self.volumes[i].kind == DriveKind::Internal)
+                .collect();
+            let external: Vec<usize> = (0..self.volumes.len())
+                .filter(|&i| self.volumes[i].kind == DriveKind::External)
+                .collect();
             let mut to_scan: Option<usize> = None;
+            let avail = ui.available_width() - 8.0;
+            let (_, drive_w) = ui::grid_columns(avail, 320.0, 14.0);
+            let (_, tile_w) = ui::grid_columns(avail, 280.0, 14.0);
 
-            section_label(ui, &format!("Harde schijven ({})", internal.len()));
-            ui.add_space(8.0);
+            ui::section_header(ui, icon::HARD_DRIVES, "Harde schijven", Some(internal.len()));
             if internal.is_empty() {
-                empty_hint(ui, "Geen interne schijven gevonden. Start als administrator.");
+                ui::empty_card(ui, icon::INFO, "Geen interne schijven gevonden. Start de app als administrator.");
             } else {
                 ui.horizontal_wrapped(|ui| {
                     for &i in &internal {
-                        if draw_volume_card(ui, &self.volumes[i]) {
+                        if ui::volume_card(ui, drive_w, &self.volumes[i]) {
                             to_scan = Some(i);
                         }
                     }
                 });
             }
-
-            ui.add_space(20.0);
-            section_label(ui, &format!("Externe schijven ({})", external.len()));
             ui.add_space(8.0);
+
+            ui::section_header(ui, icon::USB, "Externe schijven", Some(external.len()));
             if external.is_empty() {
-                empty_hint(ui, "Geen externe schijven aangesloten.");
+                ui::empty_card(ui, icon::USB, "Geen externe schijven aangesloten.");
             } else {
                 ui.horizontal_wrapped(|ui| {
                     for &i in &external {
-                        if draw_volume_card(ui, &self.volumes[i]) {
+                        if ui::volume_card(ui, drive_w, &self.volumes[i]) {
                             to_scan = Some(i);
                         }
                     }
                 });
             }
-
-            ui.add_space(20.0);
-            section_label(ui, "Snelle toegang (4)");
             ui.add_space(8.0);
+
+            ui::section_header(ui, icon::LIGHTNING, "Snelle toegang", None);
             let mut quick: Option<QuickAction> = None;
             ui.horizontal_wrapped(|ui| {
-                if draw_quick_tile(ui, "\u{1F4BF}", "Schijfimage") {
+                if ui::quick_tile(ui, tile_w, icon::DISC, "Schijfimage", "Een .img- of .dd-bestand scannen", true) {
                     quick = Some(QuickAction::DiskImage);
                 }
-                if draw_quick_tile(ui, "\u{1F5A5}", "Desktop") {
-                    quick = Some(QuickAction::Desktop);
-                }
-                if draw_quick_tile(ui, "\u{1F4C1}", "Map selecteren") {
-                    quick = Some(QuickAction::SelectFolder);
-                }
-                if draw_quick_tile(ui, "\u{1F5D1}", "Prullenbak") {
-                    quick = Some(QuickAction::RecycleBin);
-                }
+                ui::quick_tile(ui, tile_w, icon::DESKTOP, "Desktop", "Verwijderd van het bureaublad", false);
+                ui::quick_tile(ui, tile_w, icon::FOLDER_OPEN, "Map selecteren", "Eén map doorzoeken", false);
+                ui::quick_tile(ui, tile_w, icon::TRASH, "Prullenbak", "Geleegde prullenbak", false);
             });
 
             if let Some(i) = to_scan {
                 let vol = &self.volumes[i];
                 let fs = vol.filesystem.to_uppercase();
-                let supported =
-                    matches!(fs.as_str(), "" | "NTFS" | "FAT" | "FAT32" | "EXFAT");
+                let supported = matches!(fs.as_str(), "" | "NTFS" | "FAT" | "FAT32" | "EXFAT");
                 if !supported {
                     self.message = Some((
                         format!(
@@ -450,12 +526,6 @@ impl DataRecovererApp {
                 }
             } else if let Some(action) = quick {
                 self.handle_quick_action(action, ctx);
-            }
-
-            if let Some((text, success)) = &self.message {
-                ui.add_space(12.0);
-                let color = if *success { theme::SUCCESS } else { theme::TEXT_DIM };
-                ui.colored_label(color, text);
             }
         });
     }
@@ -476,45 +546,24 @@ impl DataRecovererApp {
                     self.start_scan(path.to_string_lossy().into_owned(), label, ctx);
                 }
             }
-            QuickAction::Desktop | QuickAction::SelectFolder | QuickAction::RecycleBin => {
-                self.message = Some((
-                    "Deze locatie wordt in een volgende versie ondersteund. \
-                     Kies voorlopig een schijf of een schijfimage."
-                        .to_string(),
-                    false,
-                ));
-            }
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Browse
+    // -----------------------------------------------------------------------
+
     fn draw_browse(&mut self, ui: &mut egui::Ui) {
-        let Some(scan) = self.scan.as_mut() else {
+        let Some(scan) = self.scan.as_ref() else {
             return;
         };
-
-        if !scan.finished {
-            if let Ok(result) = scan.done_rx.try_recv() {
-                match result {
-                    Ok(()) => scan.finished = true,
-                    Err(e) => {
-                        let msg = if e.kind() == io::ErrorKind::PermissionDenied {
-                            "Toegang geweigerd. Start Data Recoverer als administrator \
-                             (rechtermuisknop → Als administrator uitvoeren)."
-                                .to_string()
-                        } else {
-                            format!("Scan mislukt: {e}")
-                        };
-                        self.message = Some((msg, false));
-                    }
-                }
-            }
-        }
-
         let cancel = scan.cancel.clone();
         let paused_flag = scan.paused.clone();
         let source_label = scan.source_label.clone();
         let finished = scan.finished;
-        let elapsed_secs = scan.started_at.elapsed().as_secs();
+        let elapsed_secs = scan
+            .finished_after
+            .unwrap_or_else(|| scan.started_at.elapsed().as_secs());
         let found_snapshot = scan.found.lock().unwrap().clone();
         let (records_scanned, total_records, fraction) = {
             let progress = scan.progress.lock().unwrap();
@@ -525,106 +574,168 @@ impl DataRecovererApp {
             };
             (progress.records_scanned, progress.total_records, fraction)
         };
-
         if self.selected.len() < found_snapshot.len() {
-            self.selected.resize(found_snapshot.len(), true);
+            self.selected.resize(found_snapshot.len(), false);
         }
-
         let total_found_size: u64 = found_snapshot.iter().map(|f| f.size).sum();
+        let is_paused = paused_flag.load(Ordering::Relaxed);
 
+        // Header: back + breadcrumb.
+        let mut go_back = false;
+        let mut go_root = false;
         ui.horizontal(|ui| {
-            if ui.add(theme::outline_button("← Schijven")).clicked() {
-                cancel.store(true, Ordering::Relaxed);
-                self.screen = Screen::Home;
-                self.scan = None;
-                self.message = None;
+            let filtered = self.tree_sel != TreeSel::All || self.open_category.is_some();
+            let tip = if filtered { "Terug naar alle bestanden" } else { "Terug naar schijven" };
+            if ui::icon_button(ui, icon::ARROW_LEFT, tip).clicked() {
+                go_back = true;
             }
-            ui.add_space(8.0);
-            ui.heading(format!("Gevonden bestanden ({})", found_snapshot.len()));
-            if self.tree_sel != TreeSel::All {
-                let shown = found_snapshot.iter().filter(|f| self.tree_sel.matches(f)).count();
+            ui.add_space(4.0);
+            let crumb = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&source_label)
+                        .font(theme::font_semibold(20.0))
+                        .color(if filtered { theme::TEXT_DIM } else { theme::TEXT_MAIN }),
+                )
+                .sense(egui::Sense::click()),
+            );
+            if filtered {
+                if crumb.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    go_root = true;
+                }
+                ui.label(egui::RichText::new(icon::CARET_RIGHT).font(theme::icon(16.0)).color(theme::TEXT_FAINT));
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new(format!("· {}: {shown}", self.tree_sel.describe()))
-                            .size(14.0)
-                            .color(theme::TEXT_DIM),
+                        egui::RichText::new(self.view_title()).font(theme::font_semibold(20.0)),
                     )
                     .truncate(),
                 );
             }
         });
-        if self.scan.is_none() {
-            return;
+        if go_back {
+            if self.tree_sel != TreeSel::All || self.open_category.is_some() {
+                go_root = true;
+            } else {
+                self.leave_browse();
+                return;
+            }
+        }
+        if go_root {
+            self.tree_sel = TreeSel::All;
+            self.open_category = None;
         }
         ui.add_space(12.0);
 
-        let status_height = 110.0;
+        // Status card.
+        theme::card_frame().inner_margin(egui::Margin::symmetric(18.0, 14.0)).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui::progress_ring(ui, 54.0, fraction, finished);
+                ui.add_space(6.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    let title = if finished {
+                        "Scan voltooid"
+                    } else if is_paused {
+                        "Gepauzeerd"
+                    } else {
+                        "Bezig met scannen…"
+                    };
+                    ui.label(egui::RichText::new(title).font(theme::font_semibold(16.0)));
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} gevonden · {} · {} van {} records · {}",
+                            ui::fmt_files(found_snapshot.len()),
+                            disk::format_size(total_found_size),
+                            ui::fmt_thousands(records_scanned),
+                            ui::fmt_thousands(total_records),
+                            ui::fmt_duration(elapsed_secs),
+                        ))
+                        .color(theme::TEXT_DIM),
+                    );
+                    if !finished {
+                        let current = found_snapshot.last().map(|f| f.name.as_str()).unwrap_or("…");
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("Laatst gevonden: {current}"))
+                                    .size(12.0)
+                                    .color(theme::TEXT_FAINT),
+                            )
+                            .truncate(),
+                        );
+                    }
+                });
+                if !finished {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui::icon_button(ui, icon::STOP, "Scan stoppen").clicked() {
+                            cancel.store(true, Ordering::Relaxed);
+                        }
+                        let (glyph, tip) = if is_paused {
+                            (icon::PLAY, "Hervatten")
+                        } else {
+                            (icon::PAUSE, "Pauzeren")
+                        };
+                        if ui::icon_button(ui, glyph, tip).clicked() {
+                            paused_flag.store(!is_paused, Ordering::Relaxed);
+                        }
+                    });
+                }
+            });
+            if !finished {
+                ui.add_space(10.0);
+                let (bar, _) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::hover());
+                ui::progress_bar(ui, bar, fraction, theme::ACCENT);
+            }
+        });
+        ui.add_space(12.0);
+
+        // Toolbar: select all in view.
+        let visible: Vec<usize> = (0..found_snapshot.len())
+            .filter(|&i| self.in_view(&found_snapshot[i]))
+            .collect();
+        if !visible.is_empty() {
+            ui.horizontal(|ui| {
+                let all_on = visible.iter().all(|&i| self.selected[i]);
+                if ui::checkbox_label(ui, all_on, "Alles selecteren") {
+                    for &i in &visible {
+                        self.selected[i] = !all_on;
+                    }
+                }
+                ui.label(
+                    egui::RichText::new(format!("{} in deze weergave", ui::fmt_files(visible.len())))
+                        .color(theme::TEXT_DIM),
+                );
+            });
+            ui.add_space(6.0);
+        }
+
+        // Results grid.
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
-            .max_height((ui.available_height() - status_height).max(0.0))
             .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(14.0, 14.0);
                 if found_snapshot.is_empty() {
-                    ui.colored_label(theme::TEXT_DIM, "Nog geen bestanden gevonden…");
-                } else if self.tree_sel != TreeSel::All {
-                    // A tree node is selected: show its files as a flat grid.
-                    let sel = self.tree_sel.clone();
-                    let source = self.scan_source_path.clone().unwrap_or_default();
-                    ui.horizontal_wrapped(|ui| {
-                        for (i, found) in found_snapshot.iter().enumerate() {
-                            if !sel.matches(found) {
-                                continue;
-                            }
-                            let is_images = ntfs::category_for_name(&found.name) == "Fotos";
-                            let preview = if is_images {
-                                if !self.previews.contains_key(&i) {
-                                    let tex = load_preview(ui.ctx(), &source, found, i);
-                                    self.previews.insert(i, tex);
-                                }
-                                self.previews.get(&i).and_then(|t| t.clone())
-                            } else {
-                                None
-                            };
-                            draw_file_card(
-                                ui,
-                                &mut self.selected[i],
-                                found,
-                                preview.as_ref(),
-                                is_images,
+                    ui.add_space(40.0);
+                    ui.vertical_centered(|ui| {
+                        if !finished {
+                            ui.add(egui::Spinner::new().size(28.0).color(theme::ACCENT));
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new("Zoeken naar verwijderde bestanden…").color(theme::TEXT_DIM));
+                        } else if total_records == 0 {
+                            ui.label(egui::RichText::new(icon::WARNING_CIRCLE).font(theme::icon(34.0)).color(theme::TEXT_FAINT));
+                            ui.label(
+                                egui::RichText::new(
+                                    "Geen ondersteund bestandssysteem gevonden. \
+                                     Ondersteund worden NTFS, FAT (12/16/32) en exFAT.",
+                                )
+                                .color(theme::TEXT_DIM),
                             );
+                        } else {
+                            ui.label(egui::RichText::new(icon::CHECK_CIRCLE).font(theme::icon(34.0)).color(theme::TEXT_FAINT));
+                            ui.label(egui::RichText::new("Geen verwijderde bestanden gevonden.").color(theme::TEXT_DIM));
                         }
                     });
-                } else if let Some(category) = self.open_category {
-                    if ui.add(theme::outline_button(&format!("← {category}"))).clicked() {
-                        self.open_category = None;
-                    }
-                    ui.add_space(8.0);
-                    let is_images = category == "Fotos";
-                    let source = self.scan_source_path.clone().unwrap_or_default();
-                    ui.horizontal_wrapped(|ui| {
-                        for (i, found) in found_snapshot.iter().enumerate() {
-                            if ntfs::category_for_name(&found.name) != category {
-                                continue;
-                            }
-                            let preview = if is_images {
-                                if !self.previews.contains_key(&i) {
-                                    let tex = load_preview(ui.ctx(), &source, found, i);
-                                    self.previews.insert(i, tex);
-                                }
-                                self.previews.get(&i).and_then(|t| t.clone())
-                            } else {
-                                None
-                            };
-                            draw_file_card(
-                                ui,
-                                &mut self.selected[i],
-                                found,
-                                preview.as_ref(),
-                                is_images,
-                            );
-                        }
-                    });
-                } else {
+                } else if self.tree_sel == TreeSel::All && self.open_category.is_none() {
                     let mut categories: Vec<(&'static str, usize, u64)> = Vec::new();
                     for found in &found_snapshot {
                         let cat = ntfs::category_for_name(&found.name);
@@ -636,11 +747,12 @@ impl DataRecovererApp {
                             None => categories.push((cat, 1, found.size)),
                         }
                     }
-
+                    categories.sort_by(|a, b| b.1.cmp(&a.1));
                     let mut clicked_category = None;
+                    let (_, width) = ui::grid_columns(ui.available_width() - 8.0, 250.0, 14.0);
                     ui.horizontal_wrapped(|ui| {
                         for (name, count, size) in &categories {
-                            if draw_folder_card(ui, name, *count, *size) {
+                            if ui::category_card(ui, width, name, *count, *size) {
                                 clicked_category = Some(*name);
                             }
                         }
@@ -648,106 +760,78 @@ impl DataRecovererApp {
                     if let Some(name) = clicked_category {
                         self.open_category = Some(name);
                     }
-                }
-            });
-
-        ui.add_space(12.0);
-        let is_paused = paused_flag.load(Ordering::Relaxed);
-        theme::card_frame().show(ui, |ui| {
-            // Live ticker of the file currently being recovered.
-            if !finished {
-                let current = found_snapshot
-                    .last()
-                    .map(|f| f.name.as_str())
-                    .unwrap_or("…");
-                // Truncate to one clipped line so a long name never re-flows
-                // the layout (which caused flicker during scanning).
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!("Scannen: {current}")).color(theme::TEXT_DIM),
-                    )
-                    .truncate(),
-                );
-                ui.add_space(6.0);
-            }
-            draw_progress_track(ui, fraction, ui.available_width());
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                let (badge_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::hover());
-                ui.painter()
-                    .circle_filled(badge_rect.center(), 22.0, theme::ACCENT);
-                ui.painter().text(
-                    badge_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    format!("{:.0}%", fraction * 100.0),
-                    egui::FontId::proportional(12.0),
-                    egui::Color32::WHITE,
-                );
-                ui.add_space(10.0);
-
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        let status_text = if finished {
-                            "Scan voltooid"
-                        } else if is_paused {
-                            "Gepauzeerd"
-                        } else {
-                            "Bezig met scannen"
-                        };
-                        ui.strong(status_text);
-                        ui.label(", bestanden gevonden:");
-                        ui.colored_label(theme::ACCENT, format!("{}", found_snapshot.len()));
-                        ui.colored_label(
-                            theme::TEXT_DIM,
-                            format!("({})", disk::format_size(total_found_size)),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.colored_label(
-                            theme::TEXT_DIM,
-                            format!(
-                                "{source_label} — {records_scanned}/{total_records} records — Duur: {elapsed_secs}s"
-                            ),
-                        );
-                        if !finished {
-                            let label = if is_paused { "▶ Hervatten" } else { "⏸ Pauze" };
-                            if ui.add(theme::outline_button(label)).clicked() {
-                                paused_flag.store(!is_paused, Ordering::Relaxed);
-                            }
-                            if ui.add(theme::outline_button("⏹ Stop")).clicked() {
-                                cancel.store(true, Ordering::Relaxed);
-                            }
+                } else {
+                    let source = self.scan_source_path.clone().unwrap_or_default();
+                    let (_, width) = ui::grid_columns(ui.available_width() - 8.0, 160.0, 14.0);
+                    ui.horizontal_wrapped(|ui| {
+                        for &i in &visible {
+                            let found = &found_snapshot[i];
+                            let is_image = ntfs::category_for_name(&found.name) == "Fotos";
+                            let preview = if is_image {
+                                if !self.previews.contains_key(&i) {
+                                    let tex = load_preview(ui.ctx(), &source, found, i);
+                                    self.previews.insert(i, tex);
+                                }
+                                self.previews.get(&i).and_then(|t| t.clone())
+                            } else {
+                                None
+                            };
+                            ui::file_card(ui, width, &mut self.selected[i], found, preview.as_ref(), is_image);
                         }
                     });
-                });
+                }
+            });
+    }
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let any_selected = self.selected.iter().any(|s| *s);
-                    if ui
-                        .add_enabled(any_selected, theme::accent_button("Herstellen"))
-                        .clicked()
-                    {
-                        self.recover_selected(&found_snapshot);
-                    }
-                });
+    /// Bottom bar in Browse mode: selection summary and the "Herstellen" action.
+    fn draw_action_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(scan) = self.scan.as_ref() else {
+            return;
+        };
+        let (count, bytes) = {
+            let files = scan.found.lock().unwrap();
+            files
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| self.selected.get(*i).copied().unwrap_or(false))
+                .fold((0usize, 0u64), |(c, b), (_, f)| (c + 1, b + f.size))
+        };
+
+        let mut recover = false;
+        ui.horizontal_centered(|ui| {
+            if count == 0 {
+                ui.label(egui::RichText::new("Selecteer bestanden om te herstellen").color(theme::TEXT_DIM));
+            } else {
+                ui.label(
+                    egui::RichText::new(format!("{} geselecteerd", ui::fmt_thousands(count as u64)))
+                        .font(theme::font_semibold(14.0)),
+                );
+                ui.label(egui::RichText::new(disk::format_size(bytes)).color(theme::TEXT_DIM));
+            }
+            if let Some((text, success)) = &self.message {
+                let (glyph, color) = if *success {
+                    (icon::CHECK_CIRCLE, theme::SUCCESS)
+                } else {
+                    (icon::WARNING_CIRCLE, theme::DANGER)
+                };
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new(glyph).font(theme::icon(16.0)).color(color));
+                ui.add(egui::Label::new(egui::RichText::new(text).color(color)).truncate());
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let button = ui::primary_icon_button(icon::DOWNLOAD_SIMPLE, "Herstellen");
+                if ui
+                    .add_enabled(count > 0, button.min_size(egui::vec2(140.0, 38.0)))
+                    .clicked()
+                {
+                    recover = true;
+                }
             });
         });
 
-        if finished && found_snapshot.is_empty() && total_records == 0 {
-            ui.add_space(8.0);
-            ui.colored_label(
-                theme::TEXT_DIM,
-                "Geen ondersteund bestandssysteem gevonden op deze bron. \
-                 Ondersteund worden NTFS, FAT (12/16/32) en exFAT.",
-            );
-        }
-
-        if let Some((text, success)) = &self.message {
-            ui.add_space(8.0);
-            let color = if *success { theme::SUCCESS } else { theme::DANGER };
-            ui.colored_label(color, text);
+        if recover {
+            let files = scan.found.lock().unwrap().clone();
+            self.recover_selected(&files);
         }
     }
 
@@ -760,6 +844,7 @@ impl DataRecovererApp {
             return;
         };
 
+        let mut count = 0usize;
         for (i, found) in found_files.iter().enumerate() {
             if !self.selected.get(i).copied().unwrap_or(false) {
                 continue;
@@ -768,217 +853,62 @@ impl DataRecovererApp {
                 self.message = Some((format!("Herstel van {} mislukt: {e}", found.name), false));
                 return;
             }
+            count += 1;
         }
-
-        let count = self.selected.iter().filter(|selected| **selected).count();
-        self.message = Some((format!("{count} bestand(en) hersteld naar {out_dir:?}"), true));
+        self.message = Some((
+            format!("{count} bestand(en) hersteld naar {}", out_dir.display()),
+            true,
+        ));
     }
 }
 
 #[derive(Clone, Copy)]
 enum QuickAction {
     DiskImage,
-    Desktop,
-    SelectFolder,
-    RecycleBin,
 }
 
 impl eframe::App for DataRecovererApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_scan();
+
         // Drag the right edge to resize; the width is remembered between runs.
         egui::SidePanel::left("sidebar")
             .resizable(true)
             .default_width(260.0)
-            .width_range(210.0..=520.0)
-            .frame(egui::Frame::none().fill(theme::SIDEBAR_BG))
+            .width_range(236.0..=520.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(theme::SIDEBAR_BG)
+                    .stroke(egui::Stroke::new(1.0_f32, theme::CARD_BORDER)),
+            )
             .show(ctx, |ui| match self.screen {
-                Screen::Home => self.draw_sidebar(ui),
+                Screen::Home => self.draw_sidebar_home(ui),
                 Screen::Browse => self.draw_browse_tree(ui),
             });
+
+        if matches!(self.screen, Screen::Browse) {
+            egui::TopBottomPanel::bottom("actions")
+                .exact_height(64.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::CARD_BG)
+                        .stroke(egui::Stroke::new(1.0_f32, theme::CARD_BORDER))
+                        .inner_margin(egui::Margin::symmetric(24.0, 0.0)),
+                )
+                .show(ctx, |ui| self.draw_action_bar(ui));
+        }
 
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
                     .fill(theme::APP_BG)
-                    .inner_margin(egui::Margin::same(24.0)),
+                    .inner_margin(egui::Margin::symmetric(28.0, 24.0)),
             )
             .show(ctx, |ui| match self.screen {
                 Screen::Home => self.draw_home(ui, ctx),
                 Screen::Browse => self.draw_browse(ui),
             });
     }
-}
-
-/// Width reserved for a tree row's disclosure triangle (also the indent step).
-const ARROW_W: f32 = 18.0;
-
-/// App logo + name at the top of the sidebar.
-fn draw_logo(ui: &mut egui::Ui) {
-    ui.add_space(20.0);
-    ui.horizontal(|ui| {
-        ui.add_space(16.0);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
-        ui.painter().rect_filled(rect, 8.0, theme::ACCENT);
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "D",
-            egui::FontId::proportional(18.0),
-            egui::Color32::WHITE,
-        );
-        ui.add_space(6.0);
-        ui.add(egui::Label::new(egui::RichText::new("Data Recoverer").size(16.0).strong()).truncate());
-    });
-}
-
-/// Two-segment toggle that fills the available width. Labels wrap onto two
-/// lines when the panel is narrow. Returns the clicked segment, if any.
-fn segmented_tabs(ui: &mut egui::Ui, labels: [&str; 2], active: usize) -> Option<usize> {
-    let width = ui.available_width();
-    let half = width / 2.0;
-    // Wrap between words only: if the longest word doesn't fit a segment,
-    // shrink the font instead of breaking it mid-word.
-    const BASE: f32 = 12.5;
-    let inner = half - 12.0;
-    let widest_word = labels
-        .iter()
-        .flat_map(|l| l.split(' '))
-        .map(|w| {
-            ui.painter()
-                .layout_no_wrap(w.to_string(), egui::FontId::proportional(BASE), theme::TEXT_MAIN)
-                .size()
-                .x
-        })
-        .fold(0.0, f32::max);
-    let size = if widest_word > inner {
-        (BASE * inner / widest_word).max(9.5)
-    } else {
-        BASE
-    };
-    let font = egui::FontId::proportional(size);
-    let text_h = labels
-        .iter()
-        .map(|l| {
-            ui.painter()
-                .layout(l.to_string(), font.clone(), theme::TEXT_MAIN, half - 12.0)
-                .size()
-                .y
-        })
-        .fold(0.0, f32::max);
-    let height = (text_h + 16.0).max(34.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 8.0, theme::APP_BG);
-
-    let mut clicked = None;
-    for (i, label) in labels.iter().enumerate() {
-        let seg = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + i as f32 * half, rect.top()),
-            egui::vec2(half, height),
-        )
-        .shrink(3.0);
-        let resp = ui.interact(seg, ui.id().with(("browse_tab", i)), egui::Sense::click());
-        let on = i == active;
-        if on {
-            painter.rect_filled(seg, 6.0, theme::ACCENT);
-        } else if resp.hovered() {
-            painter.rect_filled(seg, 6.0, theme::ACCENT_SOFT);
-        }
-        let color = if on { egui::Color32::WHITE } else { theme::TEXT_MAIN };
-        let mut job = egui::text::LayoutJob::simple(label.to_string(), font.clone(), color, seg.width() - 6.0);
-        job.halign = egui::Align::Center;
-        let galley = painter.layout_job(job);
-        painter.galley(
-            egui::pos2(seg.center().x, seg.center().y - galley.size().y / 2.0),
-            galley,
-            color,
-        );
-        if resp.clicked() {
-            clicked = Some(i);
-        }
-    }
-    clicked
-}
-
-/// One tree row painted at the full available width: an optional disclosure
-/// triangle (`arrow` = Some(expanded)), a label elided with "…" to fit, and a
-/// right-aligned count. Returns (row clicked, triangle clicked).
-fn tree_row(
-    ui: &mut egui::Ui,
-    indent: f32,
-    arrow: Option<bool>,
-    label: &str,
-    count: usize,
-    selected: bool,
-) -> (bool, bool) {
-    const ROW_H: f32 = 26.0;
-    let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), egui::Sense::click());
-    let painter = ui.painter_at(rect);
-
-    let bg = rect.shrink2(egui::vec2(0.0, 1.0));
-    if selected {
-        painter.rect_filled(bg, 6.0, theme::ACCENT_SOFT);
-    } else if resp.hovered() {
-        painter.rect_filled(bg, 6.0, theme::APP_BG);
-    }
-
-    let cy = rect.center().y;
-    let mut x = rect.left() + 6.0 + indent;
-    let mut arrow_clicked = false;
-    if let Some(expanded) = arrow {
-        let c = egui::pos2(x + ARROW_W / 2.0, cy);
-        let s = 4.0;
-        let pts = if expanded {
-            vec![
-                egui::pos2(c.x - s, c.y - s * 0.6),
-                egui::pos2(c.x + s, c.y - s * 0.6),
-                egui::pos2(c.x, c.y + s * 0.7),
-            ]
-        } else {
-            vec![
-                egui::pos2(c.x - s * 0.6, c.y - s),
-                egui::pos2(c.x + s * 0.7, c.y),
-                egui::pos2(c.x - s * 0.6, c.y + s),
-            ]
-        };
-        painter.add(egui::Shape::convex_polygon(pts, theme::TEXT_DIM, egui::Stroke::NONE));
-        if resp.clicked() {
-            arrow_clicked = resp
-                .interact_pointer_pos()
-                .is_some_and(|p| p.x <= x + ARROW_W + 2.0);
-        }
-        x += ARROW_W;
-    }
-
-    let count_galley =
-        painter.layout_no_wrap(count.to_string(), egui::FontId::proportional(12.0), theme::TEXT_DIM);
-    let count_x = rect.right() - 8.0 - count_galley.size().x;
-    painter.galley(
-        egui::pos2(count_x, cy - count_galley.size().y / 2.0),
-        count_galley,
-        theme::TEXT_DIM,
-    );
-
-    let color = if selected { theme::ACCENT } else { theme::TEXT_MAIN };
-    let font = egui::FontId::proportional(13.0);
-    let max_w = (count_x - 8.0 - x).max(10.0);
-    let elided = painter.layout_no_wrap(label.to_owned(), font.clone(), color).size().x > max_w;
-    let mut job = egui::text::LayoutJob::simple_singleline(label.to_owned(), font, color);
-    job.wrap = egui::text::TextWrapping {
-        max_width: max_w,
-        max_rows: 1,
-        break_anywhere: true,
-        overflow_character: Some('…'),
-    };
-    let galley = painter.layout_job(job);
-    painter.galley(egui::pos2(x, cy - galley.size().y / 2.0), galley, color);
-
-    let row_clicked = resp.clicked() && !arrow_clicked;
-    if elided {
-        resp.on_hover_text(label);
-    }
-    (row_clicked, arrow_clicked)
 }
 
 /// Nested folder tree built from each file's original folder, with counts
@@ -1031,8 +961,9 @@ impl FolderTree {
             let indent = depth as f32 * ARROW_W + if has_kids { 0.0 } else { ARROW_W };
             let count = self.totals.get(path).copied().unwrap_or(0);
             let selected = matches!(current, TreeSel::Folder(p) if p == path);
+            let glyph = if has_kids && is_exp { icon::FOLDER_OPEN } else { icon::FOLDER };
             let (clicked, arrow) =
-                tree_row(ui, indent, has_kids.then_some(is_exp), name, count, selected);
+                ui::tree_row(ui, indent, has_kids.then_some(is_exp), Some(glyph), name, count, selected);
             if arrow {
                 *toggle = Some(path.clone());
             } else if clicked {
@@ -1045,221 +976,7 @@ impl FolderTree {
     }
 }
 
-fn section_label(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).size(14.0).color(theme::TEXT_DIM));
-}
-
-fn empty_hint(ui: &mut egui::Ui, text: &str) {
-    theme::card_frame().show(ui, |ui| {
-        ui.colored_label(theme::TEXT_DIM, text);
-    });
-}
-
-/// Draws a Recoverit-style volume card (filesystem + disk badges, label,
-/// usage, and a "Scannen" pill on hover) and returns whether it was clicked.
-fn draw_volume_card(ui: &mut egui::Ui, vol: &VolumeInfo) -> bool {
-    let card_size = egui::vec2(300.0, 104.0);
-    let (rect, response) = ui.allocate_exact_size(card_size, egui::Sense::click());
-
-    let bg = if response.hovered() {
-        theme::ACCENT_SOFT
-    } else {
-        theme::CARD_BG
-    };
-    let painter = ui.painter();
-    painter.rect_filled(rect, 12.0, bg);
-    painter.rect_stroke(rect, 12.0, egui::Stroke::new(1.0_f32, theme::CARD_BORDER));
-
-    // Badges top-left.
-    let mut badge_x = rect.min.x + 16.0;
-    let badge_y = rect.min.y + 14.0;
-    if !vol.filesystem.is_empty() {
-        badge_x = draw_badge(ui, egui::pos2(badge_x, badge_y), &vol.filesystem) + 6.0;
-    }
-    if let Some(idx) = vol.disk_index {
-        draw_badge(ui, egui::pos2(badge_x, badge_y), &format!("Schijf{idx}"));
-    }
-
-    // Disk icon.
-    let painter = ui.painter();
-    let icon_rect = egui::Rect::from_min_size(
-        rect.min + egui::vec2(16.0, 44.0),
-        egui::vec2(44.0, 44.0),
-    );
-    painter.rect_filled(icon_rect, 8.0, theme::ACCENT_SOFT);
-    painter.text(
-        icon_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        "\u{1F5B4}",
-        egui::FontId::proportional(22.0),
-        theme::ACCENT,
-    );
-
-    // Name + usage.
-    let text_x = rect.min.x + 72.0;
-    painter.text(
-        egui::pos2(text_x, rect.min.y + 48.0),
-        egui::Align2::LEFT_TOP,
-        vol.display_name(),
-        egui::FontId::proportional(15.0),
-        theme::TEXT_MAIN,
-    );
-    painter.text(
-        egui::pos2(text_x, rect.min.y + 70.0),
-        egui::Align2::LEFT_TOP,
-        format!(
-            "{} / {}",
-            disk::format_size(vol.used_bytes),
-            disk::format_size(vol.total_bytes)
-        ),
-        egui::FontId::proportional(12.0),
-        theme::TEXT_DIM,
-    );
-
-    // "Scannen" pill on hover.
-    if response.hovered() {
-        let pill = egui::Rect::from_min_size(
-            egui::pos2(rect.max.x - 92.0, rect.max.y - 34.0),
-            egui::vec2(76.0, 24.0),
-        );
-        painter.rect_filled(pill, 12.0, theme::ACCENT);
-        painter.text(
-            pill.center(),
-            egui::Align2::CENTER_CENTER,
-            "Scannen",
-            egui::FontId::proportional(12.0),
-            egui::Color32::WHITE,
-        );
-    }
-
-    ui.add_space(6.0);
-    response.clicked()
-}
-
-/// Draws a small rounded badge at `pos` and returns its right edge x.
-fn draw_badge(ui: &mut egui::Ui, pos: egui::Pos2, text: &str) -> f32 {
-    let font = egui::FontId::proportional(10.0);
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.to_string(), font.clone(), theme::ACCENT);
-    let pad = 7.0;
-    let w = galley.size().x + pad * 2.0;
-    let h = 17.0;
-    let badge = egui::Rect::from_min_size(pos, egui::vec2(w, h));
-    let painter = ui.painter();
-    painter.rect_filled(badge, 5.0, theme::ACCENT_SOFT);
-    painter.text(
-        badge.center(),
-        egui::Align2::CENTER_CENTER,
-        text,
-        font,
-        theme::ACCENT,
-    );
-    badge.max.x
-}
-
-/// Draws a quick-access tile (icon + label) and returns whether clicked.
-fn draw_quick_tile(ui: &mut egui::Ui, icon: &str, label: &str) -> bool {
-    let size = egui::vec2(210.0, 84.0);
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let bg = if response.hovered() {
-        theme::ACCENT_SOFT
-    } else {
-        theme::CARD_BG
-    };
-    let painter = ui.painter();
-    painter.rect_filled(rect, 12.0, bg);
-    painter.rect_stroke(rect, 12.0, egui::Stroke::new(1.0_f32, theme::CARD_BORDER));
-
-    let icon_rect =
-        egui::Rect::from_min_size(rect.min + egui::vec2(18.0, 22.0), egui::vec2(40.0, 40.0));
-    painter.rect_filled(icon_rect, 8.0, theme::ACCENT_SOFT);
-    painter.text(
-        icon_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        icon,
-        egui::FontId::proportional(20.0),
-        theme::ACCENT,
-    );
-    painter.text(
-        rect.min + egui::vec2(70.0, 42.0),
-        egui::Align2::LEFT_CENTER,
-        label,
-        egui::FontId::proportional(15.0),
-        theme::TEXT_MAIN,
-    );
-
-    ui.add_space(6.0);
-    response.clicked()
-}
-
-fn draw_file_card(
-    ui: &mut egui::Ui,
-    selected: &mut bool,
-    found: &RecoveredFile,
-    preview: Option<&egui::TextureHandle>,
-    image_attempted: bool,
-) {
-    let extension = std::path::Path::new(&found.name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("?")
-        .to_uppercase();
-
-    // An image whose preview was attempted but failed: its data clusters
-    // were most likely already reused, so it can't be shown or reliably
-    // recovered. Mark it plainly instead of a badge that looks functional.
-    let overwritten = image_attempted && preview.is_none();
-
-    let card_size = egui::vec2(140.0, 146.0);
-    ui.allocate_ui(card_size, |ui| {
-        theme::card_frame().show(ui, |ui| {
-            ui.set_width(108.0);
-            ui.checkbox(selected, "");
-            ui.vertical_centered(|ui| {
-                if let Some(tex) = preview {
-                    let src = egui::load::SizedTexture::new(tex.id(), tex.size_vec2());
-                    ui.add(
-                        egui::Image::new(src)
-                            .max_size(egui::vec2(72.0, 56.0))
-                            .rounding(egui::Rounding::same(6.0)),
-                    );
-                } else {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
-                    let (bg, fg) = if overwritten {
-                        (theme::TRACK_BG, theme::TEXT_DIM)
-                    } else {
-                        (theme::ACCENT_SOFT, theme::ACCENT)
-                    };
-                    ui.painter().rect_filled(rect, 8.0, bg);
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        extension,
-                        egui::FontId::proportional(13.0),
-                        fg,
-                    );
-                }
-                ui.add_space(4.0);
-                ui.add(egui::Label::new(egui::RichText::new(&found.name).size(11.0)).truncate())
-                    .on_hover_text(&found.name);
-                ui.colored_label(theme::TEXT_DIM, disk::format_size(found.size));
-                if overwritten {
-                    ui.label(
-                        egui::RichText::new("Geen voorbeeld")
-                            .size(9.5)
-                            .italics()
-                            .color(theme::TEXT_DIM),
-                    )
-                    .on_hover_text("Data mogelijk al overschreven – herstel kan onvolledig zijn.");
-                }
-            });
-        });
-    });
-}
-
-/// Reads a recovered image into memory and uploads a small thumbnail texture.
+/// Reads a recovered image into memory and uploads a thumbnail texture.
 /// Returns `None` when the file is too large, unreadable, or not a decodable
 /// image (e.g. its clusters were already reused after deletion).
 fn load_preview(
@@ -1274,76 +991,18 @@ fn load_preview(
     }
     let bytes = ntfs::read_file_bytes(source, rec, MAX_PREVIEW_BYTES).ok()?;
     let image = image::load_from_memory(&bytes).ok()?;
-    let thumb = image.thumbnail(80, 80).to_rgba8();
+    let thumb = image.thumbnail(256, 256).to_rgba8();
     let size = [thumb.width() as usize, thumb.height() as usize];
     let color = egui::ColorImage::from_rgba_unmultiplied(size, thumb.as_raw());
     Some(ctx.load_texture(format!("preview_{idx}"), color, egui::TextureOptions::LINEAR))
 }
 
-/// Draws a folder card for a file category and returns whether it was
-/// clicked (to drill into that category's files).
-fn draw_folder_card(ui: &mut egui::Ui, name: &str, count: usize, size: u64) -> bool {
-    let card_size = egui::vec2(140.0, 126.0);
-    let mut clicked = false;
-    ui.allocate_ui(card_size, |ui| {
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(124.0, 112.0), egui::Sense::click());
-        let bg = if response.hovered() {
-            theme::ACCENT_SOFT
-        } else {
-            theme::CARD_BG
-        };
-        ui.painter().rect_filled(rect, 10.0, bg);
-        ui.painter()
-            .rect_stroke(rect, 10.0, egui::Stroke::new(1.0_f32, theme::CARD_BORDER));
-
-        let folder_center = rect.center() - egui::vec2(0.0, 14.0);
-        let body = egui::Rect::from_center_size(folder_center, egui::vec2(52.0, 38.0));
-        let tab = egui::Rect::from_min_size(
-            egui::pos2(body.min.x + 4.0, body.min.y - 8.0),
-            egui::vec2(22.0, 10.0),
-        );
-        ui.painter().rect_filled(tab, 3.0, theme::FOLDER_COLOR);
-        ui.painter().rect_filled(body, 4.0, theme::FOLDER_COLOR);
-
-        ui.painter().text(
-            rect.center() + egui::vec2(0.0, 28.0),
-            egui::Align2::CENTER_CENTER,
-            name,
-            egui::FontId::proportional(14.0),
-            theme::TEXT_MAIN,
-        );
-        ui.painter().text(
-            rect.center() + egui::vec2(0.0, 46.0),
-            egui::Align2::CENTER_CENTER,
-            format!("{count} • {}", disk::format_size(size)),
-            egui::FontId::proportional(11.0),
-            theme::TEXT_DIM,
-        );
-
-        if response.clicked() {
-            clicked = true;
-        }
-    });
-    clicked
-}
-
-fn draw_progress_track(ui: &mut egui::Ui, fraction: f32, width: f32) {
-    let height = 8.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width.max(1.0), height), egui::Sense::hover());
-    let rounding = height / 2.0;
-
-    ui.painter().rect_filled(rect, rounding, theme::TRACK_BG);
-
-    let filled_width = (rect.width() * fraction.clamp(0.0, 1.0)).max(height);
-    let filled_rect =
-        egui::Rect::from_min_size(rect.min, egui::vec2(filled_width.min(rect.width()), height));
-    ui.painter().rect_filled(filled_rect, rounding, theme::ACCENT);
-}
-
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([940.0, 640.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Data Recoverer")
+            .with_inner_size([1180.0, 760.0])
+            .with_min_inner_size([920.0, 600.0]),
         ..Default::default()
     };
 
