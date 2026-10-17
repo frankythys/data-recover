@@ -278,44 +278,24 @@ pub fn nav_item(ui: &mut Ui, glyph: &str, label: &str, active: bool) -> Response
     resp
 }
 
-/// Two-segment pill toggle that fills the available width. Labels wrap
-/// between words and the font shrinks if a single word doesn't fit.
-pub fn segmented_tabs(ui: &mut Ui, labels: [&str; 2], active: usize) -> Option<usize> {
+/// Two-segment pill toggle that fills the available width. Each segment is
+/// (icon, label, tooltip) on a single line with a fixed height; when space
+/// runs out the icon is dropped first, then the label is elided.
+pub fn segmented_tabs(ui: &mut Ui, items: [(&str, &str, &str); 2], active: usize) -> Option<usize> {
     let width = ui.available_width();
     let half = width / 2.0;
-    const BASE: f32 = 13.0;
-    let inner = half - 14.0;
-    // Shrink in small steps, measuring the real width each time (egui rounds
-    // font sizes, so a linear estimate can still be a few pixels too wide).
-    let widest = |size: f32| {
-        labels
-            .iter()
-            .flat_map(|l| l.split(' '))
-            .map(|w| ui.painter().layout_no_wrap(w.to_owned(), theme::font_medium(size), theme::TEXT_MAIN).size().x)
-            .fold(0.0, f32::max)
-    };
-    let mut size = BASE;
-    while size > 9.0 && widest(size) > inner - 2.0 {
-        size -= 0.5;
-    }
-    let font = theme::font_medium(size);
-    let text_h = labels
-        .iter()
-        .map(|l| ui.painter().layout(l.to_string(), font.clone(), theme::TEXT_MAIN, inner).size().y)
-        .fold(0.0, f32::max);
-    let height = (text_h + 14.0).max(36.0);
+    let height = 36.0;
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     ui.painter().rect_filled(rect, 9.0, theme::SUBTLE_BG);
 
     let mut clicked = None;
-    for (i, label) in labels.iter().enumerate() {
+    for (i, (glyph, label, tooltip)) in items.iter().enumerate() {
         let seg = Rect::from_min_size(pos2(rect.left() + i as f32 * half, rect.top()), vec2(half, height)).shrink(3.0);
         let resp = ui.interact(seg, ui.id().with(("segment", i)), Sense::click());
         let on = i == active;
-        let p = ui.painter();
         if on {
-            p.add(theme::card_shadow().as_shape(seg, 7.0));
-            p.rect_filled(seg, 7.0, theme::CARD_BG);
+            ui.painter().add(theme::card_shadow().as_shape(seg, 7.0));
+            ui.painter().rect_filled(seg, 7.0, theme::CARD_BG);
         }
         let color = if on {
             theme::ACCENT
@@ -324,10 +304,19 @@ pub fn segmented_tabs(ui: &mut Ui, labels: [&str; 2], active: usize) -> Option<u
         } else {
             theme::TEXT_DIM
         };
-        let mut job = egui::text::LayoutJob::simple(label.to_string(), font.clone(), color, seg.width() - 8.0);
-        job.halign = egui::Align::Center;
-        let galley = p.layout_job(job);
-        p.galley(pos2(seg.center().x, seg.center().y - galley.size().y / 2.0), galley, color);
+        let room = seg.width() - 12.0;
+        let with_icon = ui.painter().layout_job(icon_text_job(glyph, label, 13.0, color));
+        let galley = if with_icon.size().x <= room {
+            with_icon
+        } else {
+            elided(ui, label, theme::font_medium(13.0), color, room).0
+        };
+        ui.painter().galley(
+            pos2(seg.center().x - galley.size().x / 2.0, seg.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(*tooltip);
         if resp.clicked() {
             clicked = Some(i);
         }

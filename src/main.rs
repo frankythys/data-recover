@@ -299,7 +299,11 @@ impl DataRecovererApp {
             .inner_margin(egui::Margin::symmetric(12.0, 0.0))
             .show(ui, |ui| {
                 let active = if tab == BrowseTab::Date { 0 } else { 1 };
-                if let Some(i) = ui::segmented_tabs(ui, ["Opnamedatum", "Oorspronkelijke map"], active) {
+                let tabs = [
+                    (icon::CALENDAR_BLANK, "Datum", "Groeperen op opnamedatum (laatst gewijzigd)"),
+                    (icon::FOLDER, "Mappen", "Groeperen op oorspronkelijke map"),
+                ];
+                if let Some(i) = ui::segmented_tabs(ui, tabs, active) {
                     new_tab = Some(if i == 0 { BrowseTab::Date } else { BrowseTab::Folder });
                 }
                 ui.add_space(10.0);
