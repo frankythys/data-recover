@@ -224,11 +224,12 @@ impl DataRecovererApp {
             if let Some(i) = to_scan {
                 let vol = &self.volumes[i];
                 let fs = vol.filesystem.to_uppercase();
-                let supported = matches!(fs.as_str(), "" | "NTFS" | "FAT32" | "EXFAT");
+                let supported =
+                    matches!(fs.as_str(), "" | "NTFS" | "FAT" | "FAT32" | "EXFAT");
                 if !supported {
                     self.message = Some((
                         format!(
-                            "{} gebruikt {}. Ondersteund worden NTFS, FAT32 en exFAT.",
+                            "{} gebruikt {}. Ondersteund worden NTFS, FAT (12/16/32) en exFAT.",
                             vol.display_name(),
                             vol.filesystem
                         ),
@@ -463,7 +464,7 @@ impl DataRecovererApp {
             ui.colored_label(
                 theme::TEXT_DIM,
                 "Geen ondersteund bestandssysteem gevonden op deze bron. \
-                 Ondersteund worden NTFS, FAT32 en exFAT.",
+                 Ondersteund worden NTFS, FAT (12/16/32) en exFAT.",
             );
         }
 

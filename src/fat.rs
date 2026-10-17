@@ -25,50 +25,85 @@ fn u64le(b: &[u8], o: usize) -> u64 {
     ])
 }
 
-/// Recognises a FAT32 boot sector (used so a bare `\\.\D:` volume handle is
-/// scanned correctly). exFAT and NTFS are matched by their 8-byte OEM tag.
-pub fn is_fat32_boot(boot: &[u8]) -> bool {
+/// Recognises a FAT12/16/32 boot sector (used so a bare `\\.\D:` volume
+/// handle is scanned correctly). exFAT and NTFS are matched by their 8-byte
+/// OEM tag before this is consulted.
+pub fn is_fat_boot(boot: &[u8]) -> bool {
     if boot.len() < 512 || boot[510] != 0x55 || boot[511] != 0xAA {
         return false;
     }
-    let bytes_per_sector = u16le(boot, 11);
-    if !matches!(bytes_per_sector, 512 | 1024 | 2048 | 4096) {
+    if !matches!(u16le(boot, 11), 512 | 1024 | 2048 | 4096) || boot[13] == 0 {
         return false;
     }
-    &boot[82..87] == b"FAT32"
+    // FAT32 keeps its type string at 82..87, FAT12/16 at 54..59.
+    &boot[82..87] == b"FAT32" || &boot[54..57] == b"FAT"
 }
 
 // ---------------------------------------------------------------------------
-// FAT32
+// FAT12 / FAT16 / FAT32
 // ---------------------------------------------------------------------------
 
-struct Fat32 {
+#[derive(Clone, Copy, PartialEq)]
+enum FatKind {
+    F12,
+    F16,
+    F32,
+}
+
+struct Fat {
     part_off: u64,
-    bytes_per_sector: u64,
-    sectors_per_cluster: u64,
+    bps: u64,
+    spc: u64,
     fat_off: u64,
-    data_start_sector: u64,
+    first_data_sector: u64,
+    kind: FatKind,
 }
 
-impl Fat32 {
+impl Fat {
     fn cluster_offset(&self, cluster: u32) -> u64 {
         self.part_off
-            + (self.data_start_sector + (cluster as u64 - 2) * self.sectors_per_cluster)
-                * self.bytes_per_sector
+            + (self.first_data_sector + (cluster as u64 - 2) * self.spc) * self.bps
     }
     fn cluster_size(&self) -> u64 {
-        self.bytes_per_sector * self.sectors_per_cluster
+        self.bps * self.spc
     }
     fn next_cluster(&self, file: &mut File, cluster: u32) -> io::Result<u32> {
-        let entry = disk::read_at(file, self.fat_off + cluster as u64 * 4, 4)?;
-        if entry.len() < 4 {
-            return Ok(0x0FFF_FFFF);
+        match self.kind {
+            FatKind::F32 => {
+                let e = disk::read_at(file, self.fat_off + cluster as u64 * 4, 4)?;
+                if e.len() < 4 {
+                    return Ok(0x0FFF_FFFF);
+                }
+                Ok(u32le(&e, 0) & 0x0FFF_FFFF)
+            }
+            FatKind::F16 => {
+                let e = disk::read_at(file, self.fat_off + cluster as u64 * 2, 2)?;
+                if e.len() < 2 {
+                    return Ok(0xFFFF);
+                }
+                Ok(u16le(&e, 0) as u32)
+            }
+            FatKind::F12 => {
+                let off = self.fat_off + cluster as u64 * 3 / 2;
+                let e = disk::read_at(file, off, 2)?;
+                if e.len() < 2 {
+                    return Ok(0xFFF);
+                }
+                let raw = u16le(&e, 0);
+                Ok((if cluster & 1 == 0 { raw & 0x0FFF } else { raw >> 4 }) as u32)
+            }
         }
-        Ok(u32le(&entry, 0) & 0x0FFF_FFFF)
+    }
+    fn is_eoc(&self, v: u32) -> bool {
+        match self.kind {
+            FatKind::F32 => v >= 0x0FFF_FFF8,
+            FatKind::F16 => v >= 0xFFF8,
+            FatKind::F12 => v >= 0xFF8,
+        }
     }
 }
 
-pub fn scan_fat32(
+pub fn scan_fat(
     file: &mut File,
     part_off: u64,
     cancel: &std::sync::atomic::AtomicBool,
@@ -85,82 +120,65 @@ pub fn scan_fat32(
     let spc = boot[13] as u64;
     let reserved = u16le(&boot, 14) as u64;
     let num_fats = boot[16] as u64;
-    let fat_size = u32le(&boot, 36) as u64;
+    let root_entries = u16le(&boot, 17) as u64;
+    let fat_size_16 = u16le(&boot, 22) as u64;
+    let fat_size_32 = u32le(&boot, 36) as u64;
+    let total16 = u16le(&boot, 19) as u64;
+    let total32 = u32le(&boot, 32) as u64;
     let root_cluster = u32le(&boot, 44);
-    if bps == 0 || spc == 0 || root_cluster < 2 {
+    if bps == 0 || spc == 0 {
         return Ok(());
     }
 
-    let fs = Fat32 {
-        part_off,
-        bytes_per_sector: bps,
-        sectors_per_cluster: spc,
-        fat_off: part_off + reserved * bps,
-        data_start_sector: reserved + num_fats * fat_size,
+    let fat_size = if fat_size_16 != 0 { fat_size_16 } else { fat_size_32 };
+    let total_sectors = if total16 != 0 { total16 } else { total32 };
+    let root_dir_sectors = (root_entries * 32).div_ceil(bps);
+    let first_data_sector = reserved + num_fats * fat_size + root_dir_sectors;
+    let data_sectors = total_sectors.saturating_sub(first_data_sector);
+    let count_clusters = if spc > 0 { data_sectors / spc } else { 0 };
+    let kind = if count_clusters < 4085 {
+        FatKind::F12
+    } else if count_clusters < 65525 {
+        FatKind::F16
+    } else {
+        FatKind::F32
     };
 
-    let mut stack = vec![root_cluster];
-    let mut visited: HashSet<u32> = HashSet::new();
-    let mut scanned: u64 = 0;
+    let fs = Fat {
+        part_off,
+        bps,
+        spc,
+        fat_off: part_off + reserved * bps,
+        first_data_sector,
+        kind,
+    };
 
+    let mut scanned: u64 = 0;
+    let mut stack: Vec<u32> = Vec::new();
+
+    // Root directory: a fixed region on FAT12/16, a cluster chain on FAT32.
+    if kind == FatKind::F32 {
+        if root_cluster >= 2 {
+            let buf = read_chain(file, &fs, root_cluster)?;
+            process_dir(file, &fs, &buf, found, &mut stack, &mut scanned, cancel, on_progress);
+        }
+    } else {
+        let root_off = part_off + (reserved + num_fats * fat_size) * bps;
+        let buf = disk::read_at(file, root_off, (root_dir_sectors * bps) as usize)?;
+        process_dir(file, &fs, &buf, found, &mut stack, &mut scanned, cancel, on_progress);
+    }
+
+    // Subdirectories (always cluster chains in the data region).
+    let mut visited: HashSet<u32> = HashSet::new();
     while let Some(start) = stack.pop() {
-        if !visited.insert(start) {
+        if !visited.insert(start) || scanned > MAX_ENTRIES {
             continue;
         }
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let buf = read_fat32_chain(file, &fs, start)?;
-        let mut lfn: Vec<Vec<u16>> = Vec::new();
-        let mut i = 0usize;
-        while i + 32 <= buf.len() {
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            let e = &buf[i..i + 32];
-            i += 32;
-            scanned += 1;
-            if scanned % 4096 == 0 {
-                on_progress(ScanProgress {
-                    records_scanned: scanned,
-                    total_records: scanned,
-                });
-            }
-            let first = e[0];
-            let attr = e[11];
-            if first == 0x00 {
-                lfn.clear();
-                continue;
-            }
-            if attr == 0x0F {
-                lfn.push(lfn_chars(e));
-                continue;
-            }
-            if first == 0xE5 {
-                let name = assemble_name(&lfn, e);
-                let (start_cl, size) = short_entry(e);
-                if size > 0 && start_cl >= 2 && !name.is_empty() {
-                    found.lock().unwrap().push(RecoveredFile {
-                        name,
-                        size: size as u64,
-                        data: DataLocation::NonResident(vec![(
-                            fs.cluster_offset(start_cl),
-                            size as u64,
-                        )]),
-                    });
-                }
-            } else if attr & 0x10 != 0 {
-                // live subdirectory: recurse, skipping "." and ".."
-                let (start_cl, _) = short_entry(e);
-                if start_cl >= 2 && e[0] != b'.' && stack.len() < MAX_DIR_CLUSTERS {
-                    stack.push(start_cl);
-                }
-            }
-            lfn.clear();
-        }
-        if scanned > MAX_ENTRIES {
-            break;
-        }
+        let buf = read_chain(file, &fs, start)?;
+        process_dir(file, &fs, &buf, found, &mut stack, &mut scanned, cancel, on_progress);
     }
 
     on_progress(ScanProgress {
@@ -170,17 +188,80 @@ pub fn scan_fat32(
     Ok(())
 }
 
-fn read_fat32_chain(file: &mut File, fs: &Fat32, start: u32) -> io::Result<Vec<u8>> {
+/// Iterates one directory's 32-byte entries, collecting deleted files and
+/// queuing live subdirectories onto `stack`.
+fn process_dir(
+    file: &mut File,
+    fs: &Fat,
+    buf: &[u8],
+    found: &std::sync::Mutex<Vec<RecoveredFile>>,
+    stack: &mut Vec<u32>,
+    scanned: &mut u64,
+    cancel: &std::sync::atomic::AtomicBool,
+    on_progress: &mut dyn FnMut(ScanProgress),
+) {
+    use std::sync::atomic::Ordering;
+    let _ = file;
+    let mut lfn: Vec<Vec<u16>> = Vec::new();
+    let mut i = 0usize;
+    while i + 32 <= buf.len() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let e = &buf[i..i + 32];
+        i += 32;
+        *scanned += 1;
+        if *scanned % 4096 == 0 {
+            on_progress(ScanProgress {
+                records_scanned: *scanned,
+                total_records: *scanned,
+            });
+        }
+        let first = e[0];
+        let attr = e[11];
+        if first == 0x00 {
+            lfn.clear();
+            continue;
+        }
+        if attr == 0x0F {
+            lfn.push(lfn_chars(e));
+            continue;
+        }
+        if first == 0xE5 {
+            let name = assemble_name(&lfn, e);
+            let (start_cl, size) = short_entry(e);
+            if size > 0 && start_cl >= 2 && !name.is_empty() {
+                found.lock().unwrap().push(RecoveredFile {
+                    name,
+                    size: size as u64,
+                    data: DataLocation::NonResident(vec![(fs.cluster_offset(start_cl), size as u64)]),
+                });
+            }
+        } else if attr & 0x10 != 0 {
+            let (start_cl, _) = short_entry(e);
+            if start_cl >= 2 && e[0] != b'.' && stack.len() < MAX_DIR_CLUSTERS {
+                stack.push(start_cl);
+            }
+        }
+        lfn.clear();
+    }
+}
+
+fn read_chain(file: &mut File, fs: &Fat, start: u32) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut cluster = start;
     let mut guard = 0usize;
-    while cluster >= 2 && cluster < 0x0FFF_FFF8 && guard < MAX_DIR_CLUSTERS {
+    while cluster >= 2 && !fs.is_eoc(cluster) && guard < MAX_DIR_CLUSTERS {
         let chunk = disk::read_at(file, fs.cluster_offset(cluster), fs.cluster_size() as usize)?;
         if chunk.is_empty() {
             break;
         }
         out.extend_from_slice(&chunk);
-        cluster = fs.next_cluster(file, cluster)?;
+        let next = fs.next_cluster(file, cluster)?;
+        if next < 2 || fs.is_eoc(next) || next == cluster {
+            break;
+        }
+        cluster = next;
         guard += 1;
     }
     Ok(out)

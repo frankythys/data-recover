@@ -77,8 +77,8 @@ pub fn scan_drive(
                 crate::fat::scan_exfat(&mut file, part.start, cancel, found, &mut on_progress)?;
                 continue;
             }
-            if crate::fat::is_fat32_boot(&boot) {
-                crate::fat::scan_fat32(&mut file, part.start, cancel, found, &mut on_progress)?;
+            if crate::fat::is_fat_boot(&boot) {
+                crate::fat::scan_fat(&mut file, part.start, cancel, found, &mut on_progress)?;
                 continue;
             }
         }
@@ -232,7 +232,7 @@ fn read_partitions(file: &mut File) -> io::Result<Vec<Partition>> {
     // A volume handle (e.g. `\\.\D:`) or a bare-volume image starts directly
     // with the file-system boot sector rather than a partition table, so
     // treat the whole thing as one partition at offset 0.
-    if &mbr[3..11] == b"NTFS    " || &mbr[3..11] == b"EXFAT   " || crate::fat::is_fat32_boot(&mbr) {
+    if &mbr[3..11] == b"NTFS    " || &mbr[3..11] == b"EXFAT   " || crate::fat::is_fat_boot(&mbr) {
         return Ok(vec![Partition { start: 0 }]);
     }
 
