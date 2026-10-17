@@ -558,6 +558,41 @@ pub fn category_for_name(name: &str) -> &'static str {
     }
 }
 
+/// Reads up to `max` bytes of a recovered file's content into memory, used
+/// to decode image previews without writing anything to disk.
+pub fn read_file_bytes(source_path: &str, rec: &RecoveredFile, max: u64) -> io::Result<Vec<u8>> {
+    match &rec.data {
+        DataLocation::Resident(bytes) => {
+            let mut out = bytes.clone();
+            out.truncate(max as usize);
+            Ok(out)
+        }
+        DataLocation::NonResident(runs) => {
+            let mut file = File::open(source_path)?;
+            let mut out = Vec::new();
+            let mut remaining = rec.size.min(max);
+            for (run_offset, run_len) in runs {
+                if remaining == 0 {
+                    break;
+                }
+                let mut pos = *run_offset;
+                let run_end = run_offset + run_len;
+                while pos < run_end && remaining > 0 {
+                    let chunk_len = (READ_CHUNK as u64).min(run_end - pos).min(remaining) as usize;
+                    let chunk = disk::read_at(&mut file, pos, chunk_len)?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    out.extend_from_slice(&chunk);
+                    pos += chunk.len() as u64;
+                    remaining -= chunk.len() as u64;
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
 pub fn recover_file(source_path: &str, rec: &RecoveredFile, out_dir: &Path) -> io::Result<()> {
     let category_dir = out_dir.join(category_for_name(&rec.name));
     fs::create_dir_all(&category_dir)?;

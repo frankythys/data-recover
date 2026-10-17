@@ -6,6 +6,7 @@ mod theme;
 
 use disk::{DriveKind, VolumeInfo};
 use ntfs::{RecoveredFile, ScanProgress};
+use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -34,6 +35,9 @@ struct DataRecovererApp {
     scan: Option<ScanHandle>,
     selected: Vec<bool>,
     open_category: Option<&'static str>,
+    /// Lazily decoded image thumbnails, keyed by file index. `None` means a
+    /// decode was attempted and failed (clusters reused, not an image, …).
+    previews: HashMap<usize, Option<egui::TextureHandle>>,
     /// (text, is_success) shown at the bottom of a screen.
     message: Option<(String, bool)>,
 }
@@ -47,6 +51,7 @@ impl Default for DataRecovererApp {
             scan: None,
             selected: Vec::new(),
             open_category: None,
+            previews: HashMap::new(),
             message: None,
         }
     }
@@ -80,6 +85,7 @@ impl DataRecovererApp {
         self.message = None;
         self.selected.clear();
         self.open_category = None;
+        self.previews.clear();
         self.scan_source_path = Some(path);
         self.scan = Some(ScanHandle {
             source_label: label,
@@ -328,12 +334,23 @@ impl DataRecovererApp {
                         self.open_category = None;
                     }
                     ui.add_space(8.0);
+                    let is_images = category == "Fotos";
+                    let source = self.scan_source_path.clone().unwrap_or_default();
                     ui.horizontal_wrapped(|ui| {
                         for (i, found) in found_snapshot.iter().enumerate() {
                             if ntfs::category_for_name(&found.name) != category {
                                 continue;
                             }
-                            draw_file_card(ui, &mut self.selected[i], found);
+                            let preview = if is_images {
+                                if !self.previews.contains_key(&i) {
+                                    let tex = load_preview(ui.ctx(), &source, found, i);
+                                    self.previews.insert(i, tex);
+                                }
+                                self.previews.get(&i).and_then(|t| t.clone())
+                            } else {
+                                None
+                            };
+                            draw_file_card(ui, &mut self.selected[i], found, preview.as_ref());
                         }
                     });
                 } else {
@@ -631,29 +648,43 @@ fn draw_quick_tile(ui: &mut egui::Ui, icon: &str, label: &str) -> bool {
     response.clicked()
 }
 
-fn draw_file_card(ui: &mut egui::Ui, selected: &mut bool, found: &RecoveredFile) {
+fn draw_file_card(
+    ui: &mut egui::Ui,
+    selected: &mut bool,
+    found: &RecoveredFile,
+    preview: Option<&egui::TextureHandle>,
+) {
     let extension = std::path::Path::new(&found.name)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("?")
         .to_uppercase();
 
-    let card_size = egui::vec2(140.0, 126.0);
+    let card_size = egui::vec2(140.0, 140.0);
     ui.allocate_ui(card_size, |ui| {
         theme::card_frame().show(ui, |ui| {
             ui.set_width(108.0);
             ui.checkbox(selected, "");
             ui.vertical_centered(|ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
-                ui.painter().rect_filled(rect, 8.0, theme::ACCENT_SOFT);
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    extension,
-                    egui::FontId::proportional(13.0),
-                    theme::ACCENT,
-                );
+                if let Some(tex) = preview {
+                    let src = egui::load::SizedTexture::new(tex.id(), tex.size_vec2());
+                    ui.add(
+                        egui::Image::new(src)
+                            .max_size(egui::vec2(72.0, 56.0))
+                            .rounding(egui::Rounding::same(6.0)),
+                    );
+                } else {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 8.0, theme::ACCENT_SOFT);
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        extension,
+                        egui::FontId::proportional(13.0),
+                        theme::ACCENT,
+                    );
+                }
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new(&found.name).size(11.0))
                     .on_hover_text(&found.name);
@@ -661,6 +692,27 @@ fn draw_file_card(ui: &mut egui::Ui, selected: &mut bool, found: &RecoveredFile)
             });
         });
     });
+}
+
+/// Reads a recovered image into memory and uploads a small thumbnail texture.
+/// Returns `None` when the file is too large, unreadable, or not a decodable
+/// image (e.g. its clusters were already reused after deletion).
+fn load_preview(
+    ctx: &egui::Context,
+    source: &str,
+    rec: &RecoveredFile,
+    idx: usize,
+) -> Option<egui::TextureHandle> {
+    const MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
+    if rec.size == 0 || rec.size > MAX_PREVIEW_BYTES {
+        return None;
+    }
+    let bytes = ntfs::read_file_bytes(source, rec, MAX_PREVIEW_BYTES).ok()?;
+    let image = image::load_from_memory(&bytes).ok()?;
+    let thumb = image.thumbnail(80, 80).to_rgba8();
+    let size = [thumb.width() as usize, thumb.height() as usize];
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, thumb.as_raw());
+    Some(ctx.load_texture(format!("preview_{idx}"), color, egui::TextureOptions::LINEAR))
 }
 
 /// Draws a folder card for a file category and returns whether it was

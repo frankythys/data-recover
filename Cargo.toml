@@ -7,6 +7,7 @@ edition = "2024"
 eframe = "0.29"
 egui = "0.29"
 rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
