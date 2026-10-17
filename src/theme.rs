@@ -14,7 +14,19 @@ pub const DANGER: Color32 = Color32::from_rgb(214, 61, 61);
 pub const SUCCESS: Color32 = Color32::from_rgb(40, 160, 110);
 
 pub fn apply(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    // Glyphs such as ← ▸ ▾ only exist in the bundled "Hack" font, which egui
+    // uses for monospace text only; without this fallback they render as □.
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        family.push("Hack".to_owned());
+    }
+    ctx.set_fonts(fonts);
+
+    // The app is designed for light mode only. Pin it, so a dark Windows
+    // theme doesn't swap in egui's default dark style.
+    ctx.set_theme(egui::Theme::Light);
+
+    let mut style = (*ctx.style_of(egui::Theme::Light)).clone();
     let mut visuals = egui::Visuals::light();
 
     visuals.override_text_color = Some(TEXT_MAIN);
@@ -37,9 +49,12 @@ pub fn apply(ctx: &egui::Context) {
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT);
     visuals.widgets.hovered.rounding = Rounding::same(10.0);
 
-    visuals.widgets.active.bg_fill = ACCENT;
-    visuals.widgets.active.weak_bg_fill = ACCENT;
-    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+    // `active` also sets the colour of `strong()` text, so it must stay dark
+    // (white made "Scan voltooid" and the app title invisible).
+    visuals.widgets.active.bg_fill = ACCENT_SOFT;
+    visuals.widgets.active.weak_bg_fill = ACCENT_SOFT;
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, ACCENT);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, TEXT_MAIN);
     visuals.widgets.active.rounding = Rounding::same(10.0);
 
     visuals.selection.bg_fill = ACCENT_SOFT;
@@ -51,7 +66,7 @@ pub fn apply(ctx: &egui::Context) {
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(14.0, 8.0);
 
-    ctx.set_style(style);
+    ctx.set_style_of(egui::Theme::Light, style);
 }
 
 pub fn accent_button(text: &str) -> egui::Button<'_> {

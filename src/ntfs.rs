@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 const READ_CHUNK: usize = 4 * 1024 * 1024;
 const FILE_SIGNATURE: &[u8; 4] = b"FILE";
+const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 const ATTR_ATTRIBUTE_LIST: u32 = 0x20;
 const ATTR_FILE_NAME: u32 = 0x30;
 const ATTR_DATA: u32 = 0x80;
@@ -271,7 +272,17 @@ fn process_record(
     };
 
     let path = resolve_path(file, vol, mft_runs, fname.parent_ref, cache);
-    let (year, month) = filetime_to_ym(fname.modified);
+    // $FILE_NAME timestamps are only set when the file is created/renamed;
+    // the real last-modified time (kept when copying photos from a camera)
+    // lives in $STANDARD_INFORMATION at offset 8.
+    let modified = attrs
+        .iter()
+        .find(|a| {
+            a.type_id == ATTR_STANDARD_INFORMATION && !a.non_resident && a.resident_data.len() >= 16
+        })
+        .map(|a| u64::from_le_bytes(a.resident_data[8..16].try_into().unwrap()))
+        .unwrap_or(fname.modified);
+    let (year, month) = filetime_to_ym(modified);
 
     found.lock().unwrap().push(RecoveredFile {
         name: fname.name,

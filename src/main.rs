@@ -7,7 +7,7 @@ mod theme;
 
 use disk::{DriveKind, VolumeInfo};
 use ntfs::{RecoveredFile, ScanProgress};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -31,7 +31,10 @@ enum TreeSel {
     All,
     Year(u16),
     YearMonth(u16, u8),
+    /// A folder and everything below it.
     Folder(String),
+    /// Only the files directly in the volume root.
+    RootFiles,
 }
 
 impl TreeSel {
@@ -40,7 +43,28 @@ impl TreeSel {
             TreeSel::All => true,
             TreeSel::Year(y) => rf.year == *y,
             TreeSel::YearMonth(y, m) => rf.year == *y && rf.month == *m,
-            TreeSel::Folder(p) => &rf.path == p,
+            TreeSel::Folder(p) => {
+                rf.path == *p
+                    || (rf.path.len() > p.len()
+                        && rf.path.starts_with(p.as_str())
+                        && rf.path.as_bytes()[p.len()] == b'\\')
+            }
+            TreeSel::RootFiles => rf.path == "\\",
+        }
+    }
+
+    /// Short Dutch description of the active filter, for the heading.
+    fn describe(&self) -> String {
+        match self {
+            TreeSel::All => String::new(),
+            TreeSel::Year(0) => "Onbekende datum".to_string(),
+            TreeSel::Year(y) => y.to_string(),
+            TreeSel::YearMonth(y, m) => {
+                let month = MONTHS_NL.get(m.wrapping_sub(1) as usize).copied().unwrap_or("?");
+                format!("{month} {y}")
+            }
+            TreeSel::Folder(p) => p.clone(),
+            TreeSel::RootFiles => "Hoofdmap".to_string(),
         }
     }
 }
@@ -70,6 +94,7 @@ struct DataRecovererApp {
     browse_tab: BrowseTab,
     tree_sel: TreeSel,
     expanded_years: HashSet<u16>,
+    expanded_folders: HashSet<String>,
     open_category: Option<&'static str>,
     /// Lazily decoded image thumbnails, keyed by file index. `None` means a
     /// decode was attempted and failed (clusters reused, not an image, …).
@@ -89,6 +114,7 @@ impl Default for DataRecovererApp {
             browse_tab: BrowseTab::Date,
             tree_sel: TreeSel::All,
             expanded_years: HashSet::new(),
+            expanded_folders: HashSet::new(),
             open_category: None,
             previews: HashMap::new(),
             message: None,
@@ -137,6 +163,7 @@ impl DataRecovererApp {
         self.tree_sel = TreeSel::All;
         self.browse_tab = BrowseTab::Date;
         self.expanded_years.clear();
+        self.expanded_folders.clear();
         self.scan_source_path = Some(path);
         self.scan = Some(ScanHandle {
             source_label: label,
@@ -152,21 +179,7 @@ impl DataRecovererApp {
     }
 
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(20.0);
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, 8.0, theme::ACCENT);
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "D",
-                egui::FontId::proportional(18.0),
-                egui::Color32::WHITE,
-            );
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("Data Recoverer").size(16.0).strong());
-        });
+        draw_logo(ui);
 
         ui.add_space(24.0);
         ui.horizontal(|ui| {
@@ -192,38 +205,11 @@ impl DataRecovererApp {
     }
 
     /// Left panel in Browse mode: the "Opnamedatum" / "Oorspronkelijke map"
-    /// tabs and a tree that filters the file grid.
+    /// tabs and a tree that filters the file grid. Rows are painted at the
+    /// panel's current width, so nothing overflows when the panel is narrow.
     fn draw_browse_tree(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(20.0);
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, 8.0, theme::ACCENT);
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "D",
-                egui::FontId::proportional(18.0),
-                egui::Color32::WHITE,
-            );
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("Data Recoverer").size(16.0).strong());
-        });
+        draw_logo(ui);
         ui.add_space(14.0);
-
-        ui.horizontal(|ui| {
-            ui.add_space(12.0);
-            if ui.add(tab_button("Opnamedatum", self.browse_tab == BrowseTab::Date)).clicked() {
-                self.browse_tab = BrowseTab::Date;
-            }
-            if ui
-                .add(tab_button("Oorspronkelijke map", self.browse_tab == BrowseTab::Folder))
-                .clicked()
-            {
-                self.browse_tab = BrowseTab::Folder;
-            }
-        });
-        ui.add_space(8.0);
 
         let tab = self.browse_tab;
         let Some(scan) = self.scan.as_ref() else {
@@ -232,8 +218,8 @@ impl DataRecovererApp {
 
         // Aggregate counts up front, then release the lock before rendering.
         let mut years: BTreeMap<u16, (usize, BTreeMap<u8, usize>)> = BTreeMap::new();
-        let mut folders: BTreeMap<String, usize> = BTreeMap::new();
         let mut unknown_date = 0usize;
+        let mut folder_files: BTreeMap<String, usize> = BTreeMap::new();
         let total;
         {
             let files = scan.found.lock().unwrap();
@@ -250,102 +236,110 @@ impl DataRecovererApp {
                         }
                     }
                     BrowseTab::Folder => {
-                        *folders.entry(rf.path.clone()).or_default() += 1;
+                        *folder_files.entry(rf.path.clone()).or_default() += 1;
                     }
                 }
             }
         }
+        let folders = FolderTree::build(&folder_files);
 
+        let mut new_tab: Option<BrowseTab> = None;
         let mut new_sel: Option<TreeSel> = None;
         let mut toggle_year: Option<u16> = None;
+        let mut toggle_folder: Option<String> = None;
         let current = self.tree_sel.clone();
-        let expanded = &self.expanded_years;
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
+        egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(10.0, 0.0))
             .show(ui, |ui| {
-                if tree_entry(ui, 10.0, "Alle data", total, current == TreeSel::All) {
-                    new_sel = Some(TreeSel::All);
+                let active = if tab == BrowseTab::Date { 0 } else { 1 };
+                if let Some(i) = segmented_tabs(ui, ["Opnamedatum", "Oorspronkelijke map"], active) {
+                    new_tab = Some(if i == 0 { BrowseTab::Date } else { BrowseTab::Folder });
                 }
+                ui.add_space(8.0);
 
-                match tab {
-                    BrowseTab::Date => {
-                        for (&y, (ycount, months)) in years.iter().rev() {
-                            let is_exp = expanded.contains(&y);
-                            ui.horizontal(|ui| {
-                                ui.add_space(6.0);
-                                let arrow = if is_exp { "▾" } else { "▸" };
-                                if ui.add(egui::Button::new(arrow).frame(false)).clicked() {
-                                    toggle_year = Some(y);
-                                }
-                                if ui
-                                    .selectable_label(current == TreeSel::Year(y), format!("{y}"))
-                                    .clicked()
-                                {
-                                    new_sel = Some(TreeSel::Year(y));
-                                }
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.add_space(6.0);
-                                        ui.colored_label(theme::TEXT_DIM, ycount.to_string());
-                                    },
-                                );
-                            });
-                            if is_exp {
-                                for (&m, &mc) in months.iter().rev() {
-                                    let label = MONTHS_NL
-                                        .get(m.wrapping_sub(1) as usize)
-                                        .copied()
-                                        .unwrap_or("?");
-                                    if tree_entry(
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if tree_row(ui, ARROW_W, None, "Alle data", total, current == TreeSel::All).0 {
+                            new_sel = Some(TreeSel::All);
+                        }
+                        match tab {
+                            BrowseTab::Date => {
+                                for (&y, (ycount, months)) in years.iter().rev() {
+                                    let is_exp = self.expanded_years.contains(&y);
+                                    let (clicked, arrow) = tree_row(
                                         ui,
-                                        34.0,
-                                        label,
-                                        mc,
-                                        current == TreeSel::YearMonth(y, m),
-                                    ) {
-                                        new_sel = Some(TreeSel::YearMonth(y, m));
+                                        0.0,
+                                        Some(is_exp),
+                                        &y.to_string(),
+                                        *ycount,
+                                        current == TreeSel::Year(y),
+                                    );
+                                    if arrow {
+                                        toggle_year = Some(y);
+                                    } else if clicked {
+                                        new_sel = Some(TreeSel::Year(y));
+                                    }
+                                    if is_exp {
+                                        for (&m, &mc) in months.iter().rev() {
+                                            let label = MONTHS_NL
+                                                .get(m.wrapping_sub(1) as usize)
+                                                .copied()
+                                                .unwrap_or("?");
+                                            let sel = current == TreeSel::YearMonth(y, m);
+                                            if tree_row(ui, 2.0 * ARROW_W, None, label, mc, sel).0 {
+                                                new_sel = Some(TreeSel::YearMonth(y, m));
+                                            }
+                                        }
+                                    }
+                                }
+                                if unknown_date > 0 {
+                                    let sel = current == TreeSel::Year(0);
+                                    if tree_row(ui, ARROW_W, None, "Onbekende datum", unknown_date, sel).0
+                                    {
+                                        new_sel = Some(TreeSel::Year(0));
                                     }
                                 }
                             }
-                        }
-                        if unknown_date > 0
-                            && tree_entry(
-                                ui,
-                                10.0,
-                                "Onbekende datum",
-                                unknown_date,
-                                current == TreeSel::Year(0),
-                            )
-                        {
-                            new_sel = Some(TreeSel::Year(0));
-                        }
-                    }
-                    BrowseTab::Folder => {
-                        for (path, count) in folders.iter() {
-                            let depth = path.matches('\\').count().saturating_sub(1);
-                            let seg = path
-                                .rsplit('\\')
-                                .find(|s| !s.is_empty())
-                                .unwrap_or("Hoofdmap");
-                            if tree_entry(
-                                ui,
-                                10.0 + depth as f32 * 14.0,
-                                seg,
-                                *count,
-                                current == TreeSel::Folder(path.clone()),
-                            ) {
-                                new_sel = Some(TreeSel::Folder(path.clone()));
+                            BrowseTab::Folder => {
+                                if let Some(&n) = folder_files.get("\\") {
+                                    let sel = current == TreeSel::RootFiles;
+                                    if tree_row(ui, ARROW_W, None, "Hoofdmap (losse bestanden)", n, sel).0 {
+                                        new_sel = Some(TreeSel::RootFiles);
+                                    }
+                                }
+                                folders.render(
+                                    ui,
+                                    "\\",
+                                    0,
+                                    &self.expanded_folders,
+                                    &current,
+                                    &mut new_sel,
+                                    &mut toggle_folder,
+                                );
                             }
                         }
-                    }
-                }
+                    });
             });
 
+        if let Some(t) = new_tab {
+            if t != self.browse_tab {
+                // A date filter means nothing in the folder view and vice
+                // versa, so start the other tab from "Alle data".
+                self.browse_tab = t;
+                self.tree_sel = TreeSel::All;
+                self.open_category = None;
+            }
+        }
         if let Some(y) = toggle_year {
             if !self.expanded_years.remove(&y) {
                 self.expanded_years.insert(y);
+            }
+        }
+        if let Some(p) = toggle_folder {
+            if !self.expanded_folders.remove(&p) {
+                self.expanded_folders.insert(p);
             }
         }
         if let Some(sel) = new_sel {
@@ -421,7 +415,7 @@ impl DataRecovererApp {
             ui.add_space(8.0);
             let mut quick: Option<QuickAction> = None;
             ui.horizontal_wrapped(|ui| {
-                if draw_quick_tile(ui, "\u{1F5BF}", "Schijfimage") {
+                if draw_quick_tile(ui, "\u{1F4BF}", "Schijfimage") {
                     quick = Some(QuickAction::DiskImage);
                 }
                 if draw_quick_tile(ui, "\u{1F5A5}", "Desktop") {
@@ -547,6 +541,17 @@ impl DataRecovererApp {
             }
             ui.add_space(8.0);
             ui.heading(format!("Gevonden bestanden ({})", found_snapshot.len()));
+            if self.tree_sel != TreeSel::All {
+                let shown = found_snapshot.iter().filter(|f| self.tree_sel.matches(f)).count();
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("· {}: {shown}", self.tree_sel.describe()))
+                            .size(14.0)
+                            .color(theme::TEXT_DIM),
+                    )
+                    .truncate(),
+                );
+            }
         });
         if self.scan.is_none() {
             return;
@@ -683,6 +688,7 @@ impl DataRecovererApp {
 
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
                         let status_text = if finished {
                             "Scan voltooid"
                         } else if is_paused {
@@ -779,9 +785,11 @@ enum QuickAction {
 
 impl eframe::App for DataRecovererApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Drag the right edge to resize; the width is remembered between runs.
         egui::SidePanel::left("sidebar")
-            .exact_width(220.0)
-            .resizable(false)
+            .resizable(true)
+            .default_width(260.0)
+            .width_range(210.0..=520.0)
             .frame(egui::Frame::none().fill(theme::SIDEBAR_BG))
             .show(ctx, |ui| match self.screen {
                 Screen::Home => self.draw_sidebar(ui),
@@ -801,32 +809,240 @@ impl eframe::App for DataRecovererApp {
     }
 }
 
-fn tab_button(text: &str, active: bool) -> egui::Button<'static> {
-    let (fill, col) = if active {
-        (theme::ACCENT, egui::Color32::WHITE)
-    } else {
-        (theme::CARD_BG, theme::TEXT_MAIN)
-    };
-    egui::Button::new(egui::RichText::new(text.to_string()).color(col).size(12.0))
-        .fill(fill)
-        .rounding(egui::Rounding::same(8.0))
+/// Width reserved for a tree row's disclosure triangle (also the indent step).
+const ARROW_W: f32 = 18.0;
+
+/// App logo + name at the top of the sidebar.
+fn draw_logo(ui: &mut egui::Ui) {
+    ui.add_space(20.0);
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 8.0, theme::ACCENT);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "D",
+            egui::FontId::proportional(18.0),
+            egui::Color32::WHITE,
+        );
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(egui::RichText::new("Data Recoverer").size(16.0).strong()).truncate());
+    });
 }
 
-/// One selectable tree row: an indented label on the left and a count on the
-/// right. Returns whether the label was clicked.
-fn tree_entry(ui: &mut egui::Ui, indent: f32, label: &str, count: usize, selected: bool) -> bool {
-    let mut clicked = false;
-    ui.horizontal(|ui| {
-        ui.add_space(indent);
-        if ui.selectable_label(selected, label).clicked() {
-            clicked = true;
+/// Two-segment toggle that fills the available width. Labels wrap onto two
+/// lines when the panel is narrow. Returns the clicked segment, if any.
+fn segmented_tabs(ui: &mut egui::Ui, labels: [&str; 2], active: usize) -> Option<usize> {
+    let width = ui.available_width();
+    let half = width / 2.0;
+    // Wrap between words only: if the longest word doesn't fit a segment,
+    // shrink the font instead of breaking it mid-word.
+    const BASE: f32 = 12.5;
+    let inner = half - 12.0;
+    let widest_word = labels
+        .iter()
+        .flat_map(|l| l.split(' '))
+        .map(|w| {
+            ui.painter()
+                .layout_no_wrap(w.to_string(), egui::FontId::proportional(BASE), theme::TEXT_MAIN)
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+    let size = if widest_word > inner {
+        (BASE * inner / widest_word).max(9.5)
+    } else {
+        BASE
+    };
+    let font = egui::FontId::proportional(size);
+    let text_h = labels
+        .iter()
+        .map(|l| {
+            ui.painter()
+                .layout(l.to_string(), font.clone(), theme::TEXT_MAIN, half - 12.0)
+                .size()
+                .y
+        })
+        .fold(0.0, f32::max);
+    let height = (text_h + 16.0).max(34.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 8.0, theme::APP_BG);
+
+    let mut clicked = None;
+    for (i, label) in labels.iter().enumerate() {
+        let seg = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + i as f32 * half, rect.top()),
+            egui::vec2(half, height),
+        )
+        .shrink(3.0);
+        let resp = ui.interact(seg, ui.id().with(("browse_tab", i)), egui::Sense::click());
+        let on = i == active;
+        if on {
+            painter.rect_filled(seg, 6.0, theme::ACCENT);
+        } else if resp.hovered() {
+            painter.rect_filled(seg, 6.0, theme::ACCENT_SOFT);
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(6.0);
-            ui.colored_label(theme::TEXT_DIM, count.to_string());
-        });
-    });
+        let color = if on { egui::Color32::WHITE } else { theme::TEXT_MAIN };
+        let mut job = egui::text::LayoutJob::simple(label.to_string(), font.clone(), color, seg.width() - 6.0);
+        job.halign = egui::Align::Center;
+        let galley = painter.layout_job(job);
+        painter.galley(
+            egui::pos2(seg.center().x, seg.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+        if resp.clicked() {
+            clicked = Some(i);
+        }
+    }
     clicked
+}
+
+/// One tree row painted at the full available width: an optional disclosure
+/// triangle (`arrow` = Some(expanded)), a label elided with "…" to fit, and a
+/// right-aligned count. Returns (row clicked, triangle clicked).
+fn tree_row(
+    ui: &mut egui::Ui,
+    indent: f32,
+    arrow: Option<bool>,
+    label: &str,
+    count: usize,
+    selected: bool,
+) -> (bool, bool) {
+    const ROW_H: f32 = 26.0;
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+
+    let bg = rect.shrink2(egui::vec2(0.0, 1.0));
+    if selected {
+        painter.rect_filled(bg, 6.0, theme::ACCENT_SOFT);
+    } else if resp.hovered() {
+        painter.rect_filled(bg, 6.0, theme::APP_BG);
+    }
+
+    let cy = rect.center().y;
+    let mut x = rect.left() + 6.0 + indent;
+    let mut arrow_clicked = false;
+    if let Some(expanded) = arrow {
+        let c = egui::pos2(x + ARROW_W / 2.0, cy);
+        let s = 4.0;
+        let pts = if expanded {
+            vec![
+                egui::pos2(c.x - s, c.y - s * 0.6),
+                egui::pos2(c.x + s, c.y - s * 0.6),
+                egui::pos2(c.x, c.y + s * 0.7),
+            ]
+        } else {
+            vec![
+                egui::pos2(c.x - s * 0.6, c.y - s),
+                egui::pos2(c.x + s * 0.7, c.y),
+                egui::pos2(c.x - s * 0.6, c.y + s),
+            ]
+        };
+        painter.add(egui::Shape::convex_polygon(pts, theme::TEXT_DIM, egui::Stroke::NONE));
+        if resp.clicked() {
+            arrow_clicked = resp
+                .interact_pointer_pos()
+                .is_some_and(|p| p.x <= x + ARROW_W + 2.0);
+        }
+        x += ARROW_W;
+    }
+
+    let count_galley =
+        painter.layout_no_wrap(count.to_string(), egui::FontId::proportional(12.0), theme::TEXT_DIM);
+    let count_x = rect.right() - 8.0 - count_galley.size().x;
+    painter.galley(
+        egui::pos2(count_x, cy - count_galley.size().y / 2.0),
+        count_galley,
+        theme::TEXT_DIM,
+    );
+
+    let color = if selected { theme::ACCENT } else { theme::TEXT_MAIN };
+    let font = egui::FontId::proportional(13.0);
+    let max_w = (count_x - 8.0 - x).max(10.0);
+    let elided = painter.layout_no_wrap(label.to_owned(), font.clone(), color).size().x > max_w;
+    let mut job = egui::text::LayoutJob::simple_singleline(label.to_owned(), font, color);
+    job.wrap = egui::text::TextWrapping {
+        max_width: max_w,
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let galley = painter.layout_job(job);
+    painter.galley(egui::pos2(x, cy - galley.size().y / 2.0), galley, color);
+
+    let row_clicked = resp.clicked() && !arrow_clicked;
+    if elided {
+        resp.on_hover_text(label);
+    }
+    (row_clicked, arrow_clicked)
+}
+
+/// Nested folder tree built from each file's original folder, with counts
+/// that include all subfolders.
+struct FolderTree {
+    totals: HashMap<String, usize>,
+    children: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl FolderTree {
+    fn build(files_per_folder: &BTreeMap<String, usize>) -> Self {
+        let mut totals: HashMap<String, usize> = HashMap::new();
+        let mut children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (path, &count) in files_per_folder {
+            let mut cur = path.clone();
+            loop {
+                *totals.entry(cur.clone()).or_default() += count;
+                if cur == "\\" || cur.is_empty() {
+                    break;
+                }
+                let parent = match cur.rfind('\\') {
+                    Some(0) | None => "\\".to_string(),
+                    Some(i) => cur[..i].to_string(),
+                };
+                children.entry(parent.clone()).or_default().insert(cur.clone());
+                cur = parent;
+            }
+        }
+        Self { totals, children }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &self,
+        ui: &mut egui::Ui,
+        parent: &str,
+        depth: usize,
+        expanded: &HashSet<String>,
+        current: &TreeSel,
+        new_sel: &mut Option<TreeSel>,
+        toggle: &mut Option<String>,
+    ) {
+        let Some(kids) = self.children.get(parent) else {
+            return;
+        };
+        for path in kids {
+            let name = path.rsplit('\\').next().filter(|s| !s.is_empty()).unwrap_or(path);
+            let has_kids = self.children.contains_key(path);
+            let is_exp = expanded.contains(path);
+            let indent = depth as f32 * ARROW_W + if has_kids { 0.0 } else { ARROW_W };
+            let count = self.totals.get(path).copied().unwrap_or(0);
+            let selected = matches!(current, TreeSel::Folder(p) if p == path);
+            let (clicked, arrow) =
+                tree_row(ui, indent, has_kids.then_some(is_exp), name, count, selected);
+            if arrow {
+                *toggle = Some(path.clone());
+            } else if clicked {
+                *new_sel = Some(TreeSel::Folder(path.clone()));
+            }
+            if has_kids && is_exp {
+                self.render(ui, path, depth + 1, expanded, current, new_sel, toggle);
+            }
+        }
+    }
 }
 
 fn section_label(ui: &mut egui::Ui, text: &str) {
@@ -1136,7 +1352,23 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
-            Ok(Box::new(DataRecovererApp::default()))
+            let mut app = DataRecovererApp::default();
+            // `data-recoverer --scan <pad>` opent meteen een scan van een schijf
+            // of image, zonder bestandsdialoog (handig om te testen).
+            let args: Vec<String> = std::env::args().collect();
+            if let Some(path) = args
+                .iter()
+                .position(|a| a == "--scan")
+                .and_then(|i| args.get(i + 1))
+            {
+                let label = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path)
+                    .to_string();
+                app.start_scan(path.clone(), label, &cc.egui_ctx);
+            }
+            Ok(Box::new(app))
         }),
     )
 }
