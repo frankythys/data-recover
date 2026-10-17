@@ -350,7 +350,13 @@ impl DataRecovererApp {
                             } else {
                                 None
                             };
-                            draw_file_card(ui, &mut self.selected[i], found, preview.as_ref());
+                            draw_file_card(
+                                ui,
+                                &mut self.selected[i],
+                                found,
+                                preview.as_ref(),
+                                is_images,
+                            );
                         }
                     });
                 } else {
@@ -653,6 +659,7 @@ fn draw_file_card(
     selected: &mut bool,
     found: &RecoveredFile,
     preview: Option<&egui::TextureHandle>,
+    image_attempted: bool,
 ) {
     let extension = std::path::Path::new(&found.name)
         .extension()
@@ -660,7 +667,12 @@ fn draw_file_card(
         .unwrap_or("?")
         .to_uppercase();
 
-    let card_size = egui::vec2(140.0, 140.0);
+    // An image whose preview was attempted but failed: its data clusters
+    // were most likely already reused, so it can't be shown or reliably
+    // recovered. Mark it plainly instead of a badge that looks functional.
+    let overwritten = image_attempted && preview.is_none();
+
+    let card_size = egui::vec2(140.0, 146.0);
     ui.allocate_ui(card_size, |ui| {
         theme::card_frame().show(ui, |ui| {
             ui.set_width(108.0);
@@ -676,19 +688,33 @@ fn draw_file_card(
                 } else {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 8.0, theme::ACCENT_SOFT);
+                    let (bg, fg) = if overwritten {
+                        (theme::TRACK_BG, theme::TEXT_DIM)
+                    } else {
+                        (theme::ACCENT_SOFT, theme::ACCENT)
+                    };
+                    ui.painter().rect_filled(rect, 8.0, bg);
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
                         extension,
                         egui::FontId::proportional(13.0),
-                        theme::ACCENT,
+                        fg,
                     );
                 }
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new(&found.name).size(11.0))
                     .on_hover_text(&found.name);
                 ui.colored_label(theme::TEXT_DIM, disk::format_size(found.size));
+                if overwritten {
+                    ui.label(
+                        egui::RichText::new("Geen voorbeeld")
+                            .size(9.5)
+                            .italics()
+                            .color(theme::TEXT_DIM),
+                    )
+                    .on_hover_text("Data mogelijk al overschreven – herstel kan onvolledig zijn.");
+                }
             });
         });
     });
