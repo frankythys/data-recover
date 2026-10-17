@@ -267,7 +267,16 @@ impl DataRecovererApp {
             if let Ok(result) = scan.done_rx.try_recv() {
                 match result {
                     Ok(()) => scan.finished = true,
-                    Err(e) => self.message = Some((format!("Scan mislukt: {e}"), false)),
+                    Err(e) => {
+                        let msg = if e.kind() == io::ErrorKind::PermissionDenied {
+                            "Toegang geweigerd. Start Data Recoverer als administrator \
+                             (rechtermuisknop → Als administrator uitvoeren)."
+                                .to_string()
+                        } else {
+                            format!("Scan mislukt: {e}")
+                        };
+                        self.message = Some((msg, false));
+                    }
                 }
             }
         }
