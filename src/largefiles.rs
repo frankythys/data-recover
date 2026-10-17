@@ -374,7 +374,7 @@ pub fn move_to_recycle_bin(path: &Path) -> io::Result<bool> {
 pub fn recycle_unchecked(path: &Path) -> io::Result<bool> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::UI::Shell::{
-        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW, SHFileOperationW,
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW, SHFileOperationW,
     };
     use windows::core::PCWSTR;
 
@@ -382,7 +382,8 @@ pub fn recycle_unchecked(path: &Path) -> io::Result<bool> {
     let from: Vec<u16> = path.as_os_str().encode_wide().chain([0, 0]).collect();
     // FOF_WANTNUKEWARNING: without it Windows silently deletes files that are
     // too big for the Recycle Bin — exactly the files this screen is about.
-    let flags = (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0 | FOF_WANTNUKEWARNING.0) as u16;
+    // FOF_SILENT: the app shows its own progress.
+    let flags = (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0 | FOF_WANTNUKEWARNING.0 | FOF_SILENT.0) as u16;
     let mut op = SHFILEOPSTRUCTW {
         wFunc: FO_DELETE,
         pFrom: PCWSTR(from.as_ptr()),

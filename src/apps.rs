@@ -3,8 +3,7 @@
 //! safely; only caches and model files can be removed from the app.
 
 use crate::junk::{self, CleanReport};
-use crate::largefiles::{self, LargeFile};
-use std::io;
+use crate::largefiles::LargeFile;
 use std::path::{Path, PathBuf};
 
 /// What the app may do with a location.
@@ -220,19 +219,15 @@ pub fn model_files(spot: &Spot) -> Vec<LargeFile> {
     files
 }
 
-/// Moves a model file to the Recycle Bin, but only when it is a model file
-/// inside one of the `Models` locations in `spots`.
-pub fn recycle_model(spots: &[Spot], path: &Path) -> io::Result<bool> {
-    let allowed = is_model_file(path)
+/// Whether `path` may be removed: a model file inside one of the `Models`
+/// locations in `spots`.
+pub fn may_remove_model(spots: &[Spot], path: &Path) -> bool {
+    is_model_file(path)
         && spots
             .iter()
             .filter(|s| s.cleanup == Cleanup::Models)
             .flat_map(|s| &s.folders)
-            .any(|f| path.starts_with(f));
-    if !allowed {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "alleen modelbestanden mogen hier weg"));
-    }
-    largefiles::recycle_unchecked(path)
+            .any(|f| path.starts_with(f))
 }
 
 /// Empties a `Cache` location (the folders themselves stay).
@@ -298,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_recycle_anything_but_models_in_a_model_location() {
+    fn only_models_in_a_model_location_may_be_removed() {
         let t = TempTree::new("refuse");
         let dll = t.file("venv/torch.dll", 10);
         let model = t.file("models/a.safetensors", 10);
@@ -307,10 +302,10 @@ mod tests {
         let models = [t.spot(Cleanup::Models)];
         let advice = [t.spot(Cleanup::Advice)];
 
-        assert_eq!(recycle_model(&models, &dll).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(recycle_model(&models, &elsewhere).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(recycle_model(&advice, &model).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-        assert!(model.exists() && dll.exists());
+        assert!(may_remove_model(&models, &model));
+        assert!(!may_remove_model(&models, &dll));
+        assert!(!may_remove_model(&models, &elsewhere));
+        assert!(!may_remove_model(&advice, &model));
     }
 
     #[test]

@@ -2,7 +2,9 @@
 
 mod apps;
 mod apps_view;
+mod bulk_view;
 mod cleanup;
+mod deleter;
 mod disk;
 mod fat;
 mod junk;

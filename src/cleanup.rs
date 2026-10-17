@@ -7,6 +7,7 @@
 //! Windows and program files and folders are never listed.
 
 use crate::apps_view::AppsView;
+use crate::bulk_view::{self, BulkDelete};
 use crate::disk::{self, VolumeInfo};
 use crate::junk::{self, CleanReport, Kind, Measure};
 use crate::largefiles::{self, CleanupProgress, CleanupResult, LargeFile};
@@ -129,8 +130,9 @@ pub struct CleanupScreen {
     min_size: usize,
     scan: Option<CleanupScan>,
     result: Option<CleanupResult>,
-    /// Index into `result.files`.
-    selected: Option<usize>,
+    /// Ticked rows of `result.files` in "Grote bestanden".
+    checked: Vec<bool>,
+    bulk: BulkDelete,
     /// Folder open in the "Grote mappen" tab; `None` is the overview.
     folder: Option<usize>,
     /// The user's files directly inside `folder`, largest first.
@@ -152,7 +154,8 @@ impl CleanupScreen {
             min_size: 1,
             scan: None,
             result: None,
-            selected: None,
+            checked: Vec::new(),
+            bulk: BulkDelete::default(),
             folder: None,
             folder_files: Vec::new(),
             folder_sel: None,
@@ -214,6 +217,12 @@ impl CleanupScreen {
         self.draw_junk_confirm(ui.ctx());
         self.draw_recycle_confirm(ui.ctx());
         self.draw_folder_confirm(ui.ctx());
+        if let Some((mode, done)) = self.bulk.draw(ui.ctx()) {
+            self.apply_removed(&done.removed);
+            if mode == crate::deleter::Mode::RecycleBin {
+                self.junk.measures = vec![None; junk::ALL.len()];
+            }
+        }
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
@@ -258,7 +267,10 @@ impl CleanupScreen {
         };
         scan.finished_after = Some(scan.started_at.elapsed().as_secs());
         match result {
-            Ok(r) => self.result = Some(r),
+            Ok(r) => {
+                self.checked = vec![false; r.files.len()];
+                self.result = Some(r);
+            }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                 self.message = Some(("Scan gestopt.".to_string(), false));
             }
@@ -450,7 +462,7 @@ impl CleanupScreen {
         });
 
         self.result = None;
-        self.selected = None;
+        self.checked.clear();
         self.folder = None;
         self.folder_files.clear();
         self.folder_sel = None;
@@ -631,6 +643,8 @@ impl CleanupScreen {
             ui::empty_card(ui, icon::CHECK_CIRCLE, "Geen eigen bestanden gevonden boven deze grootte.");
             return;
         }
+        bulk_view::select_bar(ui, &result.files, &mut self.checked);
+        ui.add_space(6.0);
         let mut clicked = None;
         let mut open = None;
         egui::ScrollArea::vertical()
@@ -643,7 +657,7 @@ impl CleanupScreen {
                     let name = file_name(&f.path);
                     let (glyph, color) = ui::category_style(ntfs::category_for_name(&name));
                     let folder = f.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
-                    let row = result_row(ui, glyph, color, &name, &folder, f.size, self.selected == Some(i));
+                    let row = result_row(ui, glyph, color, &name, &folder, f.size, false, Some(self.checked[i]));
                     if row.double_clicked() {
                         open = Some(i);
                     } else if row.clicked() {
@@ -651,11 +665,31 @@ impl CleanupScreen {
                     }
                 }
             });
-        if let Some(i) = clicked.or(open) {
-            self.selected = Some(i);
+        if let Some(i) = clicked {
+            self.checked[i] = !self.checked[i];
         }
-        if open.is_some() {
-            self.open_selected();
+        if let Some(path) = open.map(|i| result.files[i].path.clone()) {
+            self.show_in_explorer(&path);
+        }
+    }
+
+    /// Takes removed files out of the results and clears the ticks.
+    fn apply_removed(&mut self, removed: &[PathBuf]) {
+        let Some(result) = self.result.as_mut() else {
+            return;
+        };
+        for path in removed {
+            let Some(file) = result.files.iter().find(|f| &f.path == path).cloned() else { continue };
+            let folder = path.parent().and_then(|p| result.find_dir(p));
+            result.remove_file(folder, &file);
+        }
+        self.folder_files.retain(|f| !removed.contains(&f.path));
+        self.checked = vec![false; result.files.len()];
+    }
+
+    fn show_in_explorer(&mut self, path: &Path) {
+        if let Err(e) = largefiles::show_in_explorer(path) {
+            self.message = Some((format!("Verkenner openen mislukt: {e}"), false));
         }
     }
 
@@ -745,7 +779,7 @@ impl CleanupScreen {
                             let (glyph, color) = ui::category_style(ntfs::category_for_name(&name));
                             let sub = parent_size.filter(|&t| t > 0).map(|t| format!("{} van deze map", percent(f.size, t)));
                             let selected = self.folder_sel == Some(FolderSel::File(i));
-                            let row = result_row(ui, glyph, color, &name, &sub.unwrap_or_default(), f.size, selected);
+                            let row = result_row(ui, glyph, color, &name, &sub.unwrap_or_default(), f.size, selected, None);
                             (FolderSel::File(i), (row, false))
                         };
                         let (resp, chevron) = row;
@@ -803,13 +837,24 @@ impl CleanupScreen {
                 FolderSel::File(i) => self.folder_files.get(i),
                 FolderSel::Dir(_) => None,
             },
-            _ => self.result.as_ref()?.files.get(self.selected?),
+            _ => {
+                let files = &self.result.as_ref()?.files;
+                let mut ticked = files.iter().zip(&self.checked).filter(|&(_, &c)| c);
+                match (ticked.next(), ticked.next()) {
+                    (Some((f, _)), None) => Some(f),
+                    _ => None,
+                }
+            }
         }
     }
 
     pub fn draw_action_bar(&mut self, ui: &mut egui::Ui) {
         if self.tab == Tab::Programs {
             self.apps.draw_action_bar(ui);
+            return;
+        }
+        if self.tab == Tab::Large {
+            self.draw_large_action_bar(ui);
             return;
         }
         let selection = self.selection();
@@ -859,6 +904,40 @@ impl CleanupScreen {
                 (Tab::Folders, Some(FolderSel::Dir(d))) => self.confirm_dir = Some(d),
                 _ => self.confirm = self.selected_file().cloned(),
             }
+        }
+    }
+
+    fn draw_large_action_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(result) = self.result.as_ref() else {
+            return;
+        };
+        let ticked = bulk_view::ticked(&result.files, &self.checked);
+        let mut open = false;
+        let mut remove = false;
+        ui.horizontal_centered(|ui| {
+            bulk_view::selection_label(ui, &ticked, "Vink bestanden aan om ze te verwijderen");
+            if let Some((text, success)) = &self.message {
+                let color = if *success { theme::SUCCESS } else { theme::DANGER };
+                ui.add_space(12.0);
+                ui.add(egui::Label::new(egui::RichText::new(text).color(color)).truncate());
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let button = ui::danger_icon_button(icon::TRASH, "Verwijderen…").min_size(vec2(150.0, 38.0));
+                remove = ui.add_enabled(!ticked.is_empty() && !self.bulk.busy(), button).clicked();
+                let button = ui::secondary_icon_button(icon::ARROW_SQUARE_OUT, "Open in Verkenner").min_size(vec2(170.0, 38.0));
+                open = ui
+                    .add_enabled(ticked.len() == 1, button)
+                    .on_disabled_hover_text("Vink precies één bestand aan")
+                    .clicked();
+            });
+        });
+        if open {
+            self.show_in_explorer(&ticked[0].path);
+        }
+        if remove {
+            // Only the user's own files are listed; check again to be sure.
+            let allowed = ticked.into_iter().filter(|f| !largefiles::is_system_or_app(&f.path)).collect();
+            self.bulk.ask(allowed);
         }
     }
 
@@ -989,7 +1068,7 @@ impl CleanupScreen {
                     result.remove_file(folder, file);
                 }
                 self.folder_files.retain(|f| f.path != file.path);
-                self.selected = None;
+                self.checked = vec![false; self.result.as_ref().map_or(0, |r| r.files.len())];
                 self.folder_sel = None;
                 self.message = Some((format!("{name} ({}) staat in de prullenbak.", disk::format_size(file.size)), true));
                 // The Recycle Bin grew; show its new size in the other tab.
@@ -1069,10 +1148,17 @@ pub(crate) fn result_row(
     subtitle: &str,
     size: u64,
     selected: bool,
+    checkbox: Option<bool>,
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width() - 8.0, ROW_H), Sense::click());
-    ui::paint_card(ui, rect, resp.hovered(), selected);
-    let tile = Rect::from_min_size(rect.min + vec2(12.0, 11.0), vec2(38.0, 38.0));
+    ui::paint_card(ui, rect, resp.hovered(), selected || checkbox == Some(true));
+    let mut left = rect.left() + 12.0;
+    if let Some(checked) = checkbox {
+        let check = Rect::from_center_size(pos2(left + 10.0, rect.center().y), vec2(20.0, 20.0));
+        ui::paint_checkbox(ui, check, checked);
+        left += 32.0;
+    }
+    let tile = Rect::from_min_size(pos2(left, rect.top() + 11.0), vec2(38.0, 38.0));
     ui::icon_tile(ui, tile, glyph, color, 20.0);
 
     let size_galley = ui.painter().layout_no_wrap(disk::format_size(size), theme::font_semibold(14.0), theme::TEXT_MAIN);
@@ -1085,8 +1171,12 @@ pub(crate) fn result_row(
     let (s, _) = ui::elided(ui, subtitle, theme::font(12.0), theme::TEXT_DIM, max_w);
     ui.painter().galley(pos2(x, rect.top() + 12.0), t, theme::TEXT_MAIN);
     ui.painter().galley(pos2(x, rect.top() + 33.0), s, theme::TEXT_DIM);
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(format!("{subtitle}\nDubbelklik om te openen in Verkenner"))
+    let hint = if checkbox.is_some() {
+        "Klik om aan of uit te vinken, dubbelklik om te openen in Verkenner"
+    } else {
+        "Dubbelklik om te openen in Verkenner"
+    };
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{subtitle}\n{hint}"))
 }
 
 /// One folder row with a chevron that opens it. Returns the row response
@@ -1177,7 +1267,7 @@ pub(crate) fn dialog(id: &str, ctx: &egui::Context, content: impl FnOnce(&mut eg
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
-        .fixed_size(vec2(460.0, 0.0))
+        .fixed_size(vec2(540.0, 0.0))
         .frame(theme::card_frame().inner_margin(egui::Margin::same(22.0)))
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 6.0;

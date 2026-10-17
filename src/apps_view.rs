@@ -3,7 +3,9 @@
 //! of model files that can go to the Recycle Bin.
 
 use crate::apps::{self, Cleanup, Spot};
+use crate::bulk_view::{self, BulkDelete};
 use crate::cleanup::{ROW_GAP, ROW_H, dialog, dialog_title, dim_background, file_name, notice, result_row};
+use crate::deleter::Mode;
 use crate::junk::CleanReport;
 use crate::largefiles::{self, LargeFile};
 use crate::{disk, theme, ui};
@@ -30,10 +32,11 @@ pub struct AppsView {
     open: Option<usize>,
     models: Vec<LargeFile>,
     models_rx: Option<Receiver<Vec<LargeFile>>>,
-    selected: Option<usize>,
+    /// Ticked rows of `models`.
+    checked: Vec<bool>,
+    bulk: BulkDelete,
     confirm_cache: Option<usize>,
     cache_rx: Option<Receiver<(usize, CleanReport, u64)>>,
-    confirm_model: Option<LargeFile>,
     message: Option<(String, bool)>,
     /// Set when something went to the Recycle Bin, so its size is remeasured.
     recycled: bool,
@@ -49,10 +52,10 @@ impl AppsView {
             open: None,
             models: Vec::new(),
             models_rx: None,
-            selected: None,
+            checked: Vec::new(),
+            bulk: BulkDelete::default(),
             confirm_cache: None,
             cache_rx: None,
-            confirm_model: None,
             message: None,
             recycled: false,
         }
@@ -111,6 +114,7 @@ impl AppsView {
         }
         if let Some(rx) = &self.models_rx {
             if let Ok(models) = rx.try_recv() {
+                self.checked = vec![false; models.len()];
                 self.models = models;
                 self.models_rx = None;
             }
@@ -138,7 +142,14 @@ impl AppsView {
             None => self.draw_spots(ui),
         }
         self.draw_cache_confirm(ui.ctx());
-        self.draw_model_confirm(ui.ctx());
+        if let Some((mode, done)) = self.bulk.draw(ui.ctx()) {
+            self.models.retain(|m| !done.removed.contains(&m.path));
+            self.checked = vec![false; self.models.len()];
+            if let Some(size) = self.open.and_then(|i| self.sizes[i].as_mut()) {
+                *size = size.saturating_sub(done.bytes_removed);
+            }
+            self.recycled |= mode == Mode::RecycleBin && !done.removed.is_empty();
+        }
     }
 
     fn draw_spots(&mut self, ui: &mut egui::Ui) {
@@ -225,8 +236,8 @@ impl AppsView {
                     ctx.request_repaint();
                 });
                 self.models.clear();
+                self.checked.clear();
                 self.models_rx = Some(rx);
-                self.selected = None;
                 self.open = Some(i);
             }
             Some((i, SpotAction::ClearCache)) => self.confirm_cache = Some(i),
@@ -262,6 +273,8 @@ impl AppsView {
             ui::empty_card(ui, icon::CHECK_CIRCLE, "Geen modelbestanden gevonden.");
             return;
         }
+        bulk_view::select_bar(ui, &self.models, &mut self.checked);
+        ui.add_space(6.0);
         let mut clicked = None;
         let mut open_file = None;
         egui::ScrollArea::vertical()
@@ -272,7 +285,7 @@ impl AppsView {
                 for i in range {
                     let m = &self.models[i];
                     let folder = m.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
-                    let row = result_row(ui, icon::BRAIN, theme::CAT_VIDEO, &file_name(&m.path), &folder, m.size, self.selected == Some(i));
+                    let row = result_row(ui, icon::BRAIN, theme::CAT_VIDEO, &file_name(&m.path), &folder, m.size, false, Some(self.checked[i]));
                     if row.double_clicked() {
                         open_file = Some(i);
                     } else if row.clicked() {
@@ -280,8 +293,8 @@ impl AppsView {
                     }
                 }
             });
-        if let Some(i) = clicked.or(open_file) {
-            self.selected = Some(i);
+        if let Some(i) = clicked {
+            self.checked[i] = !self.checked[i];
         }
         if let Some(i) = open_file {
             let path = self.models[i].path.clone();
@@ -290,38 +303,32 @@ impl AppsView {
     }
 
     pub fn draw_action_bar(&mut self, ui: &mut egui::Ui) {
-        let selection = self.selected.and_then(|i| self.models.get(i)).cloned();
+        let ticked = bulk_view::ticked(&self.models, &self.checked);
         let mut open = false;
-        let mut recycle = false;
+        let mut remove = false;
         ui.horizontal_centered(|ui| {
-            match &selection {
-                Some(m) => {
-                    ui.label(egui::RichText::new(file_name(&m.path)).font(theme::font_semibold(14.0)));
-                    ui.label(egui::RichText::new(disk::format_size(m.size)).color(theme::TEXT_DIM));
-                }
-                None => {
-                    ui.label(egui::RichText::new("Selecteer een model").color(theme::TEXT_DIM));
-                }
-            }
+            bulk_view::selection_label(ui, &ticked, "Vink modellen aan om ze te verwijderen");
             if let Some((text, success)) = &self.message {
                 let color = if *success { theme::SUCCESS } else { theme::DANGER };
                 ui.add_space(12.0);
                 ui.add(egui::Label::new(egui::RichText::new(text).color(color)).truncate());
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let button = ui::danger_icon_button(icon::TRASH, "Naar prullenbak").min_size(vec2(160.0, 38.0));
-                recycle = ui.add_enabled(selection.is_some(), button).clicked();
+                let button = ui::danger_icon_button(icon::TRASH, "Verwijderen…").min_size(vec2(150.0, 38.0));
+                remove = ui.add_enabled(!ticked.is_empty() && !self.bulk.busy(), button).clicked();
                 let button = ui::secondary_icon_button(icon::ARROW_SQUARE_OUT, "Open in Verkenner").min_size(vec2(170.0, 38.0));
-                open = ui.add_enabled(selection.is_some(), button).clicked();
+                open = ui
+                    .add_enabled(ticked.len() == 1, button)
+                    .on_disabled_hover_text("Vink precies één model aan")
+                    .clicked();
             });
         });
-        if let Some(m) = selection {
-            if open {
-                self.show_in_explorer(&m.path);
-            }
-            if recycle {
-                self.confirm_model = Some(m);
-            }
+        if open {
+            self.show_in_explorer(&ticked[0].path.clone());
+        }
+        if remove {
+            let allowed = ticked.into_iter().filter(|m| apps::may_remove_model(&self.spots, &m.path)).collect();
+            self.bulk.ask(allowed);
         }
     }
 
@@ -382,57 +389,6 @@ impl AppsView {
         }
     }
 
-    fn draw_model_confirm(&mut self, ctx: &egui::Context) {
-        let Some(model) = self.confirm_model.clone() else { return };
-        let mut decision = None;
-        dim_background(ctx);
-        dialog("apps_model_confirm", ctx, |ui| {
-            let sub = format!("{} · {}", file_name(&model.path), disk::format_size(model.size));
-            dialog_title(ui, icon::TRASH, theme::DANGER, "Model naar de prullenbak?", &sub);
-            ui.add(egui::Label::new(egui::RichText::new(model.path.display().to_string()).size(12.0).color(theme::TEXT_DIM)).wrap());
-            ui.add_space(4.0);
-            notice(
-                ui,
-                icon::INFO,
-                theme::ACCENT,
-                "Gebruik je dit model nog in een workflow, dan downloadt het programma het later opnieuw. \
-                 Grote modellen passen vaak niet in de prullenbak; Windows vraagt dan eerst of het definitief weg mag.",
-            );
-            ui.add_space(8.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(ui::danger_icon_button(icon::TRASH, "Naar prullenbak").min_size(vec2(150.0, 36.0))).clicked() {
-                    decision = Some(true);
-                }
-                if ui.add(ui::secondary_icon_button(icon::X, "Annuleren").min_size(vec2(120.0, 36.0))).clicked() {
-                    decision = Some(false);
-                }
-            });
-        });
-        if ctx.input(|inp| inp.key_pressed(egui::Key::Escape)) {
-            decision = Some(false);
-        }
-        match decision {
-            Some(true) => {
-                self.confirm_model = None;
-                let name = file_name(&model.path);
-                match apps::recycle_model(&self.spots, &model.path) {
-                    Ok(true) => {
-                        self.models.retain(|m| m.path != model.path);
-                        self.selected = None;
-                        if let Some(size) = self.open.and_then(|i| self.sizes[i].as_mut()) {
-                            *size = size.saturating_sub(model.size);
-                        }
-                        self.recycled = true;
-                        self.message = Some((format!("{name} ({}) is verwijderd.", disk::format_size(model.size)), true));
-                    }
-                    Ok(false) => self.message = Some((format!("{name} is niet verwijderd."), false)),
-                    Err(e) => self.message = Some((format!("{name}: {e}"), false)),
-                }
-            }
-            Some(false) => self.confirm_model = None,
-            None => {}
-        }
-    }
 }
 
 enum SpotAction {
