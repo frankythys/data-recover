@@ -1,7 +1,9 @@
-//! "Schijf opruimen" screen, in two tabs:
+//! "Schijf opruimen" screen, in three tabs:
 //! - "Systeem opschonen": caches and temporary files, cleaned in one go.
-//! - "Grote bestanden": the user's own largest files, to open in Explorer or
-//!   move to the Recycle Bin. Windows and program files are never listed.
+//! - "Grote bestanden": the user's own largest files.
+//! - "Grote mappen": the user's own folders by size, to browse into.
+//! Files and folders can be opened in Explorer or moved to the Recycle Bin.
+//! Windows and program files and folders are never listed.
 
 use crate::disk::{self, VolumeInfo};
 use crate::junk::{self, CleanReport, Kind, Measure};
@@ -29,6 +31,16 @@ const ROW_GAP: f32 = 8.0;
 enum Tab {
     Junk,
     Large,
+    Folders,
+}
+
+/// What is selected in the "Grote mappen" tab.
+#[derive(PartialEq, Clone, Copy)]
+enum FolderSel {
+    /// Index into `CleanupResult::dirs`.
+    Dir(usize),
+    /// Index into `CleanupScreen::folder_files`.
+    File(usize),
 }
 
 fn kind_icon(kind: Kind) -> &'static str {
@@ -115,7 +127,13 @@ pub struct CleanupScreen {
     result: Option<CleanupResult>,
     /// Index into `result.files`.
     selected: Option<usize>,
+    /// Folder open in the "Grote mappen" tab; `None` is the overview.
+    folder: Option<usize>,
+    /// The user's files directly inside `folder`, largest first.
+    folder_files: Vec<LargeFile>,
+    folder_sel: Option<FolderSel>,
     confirm: Option<LargeFile>,
+    confirm_dir: Option<usize>,
     /// (text, is_success) shown on the screen.
     message: Option<(String, bool)>,
 }
@@ -130,14 +148,18 @@ impl CleanupScreen {
             scan: None,
             result: None,
             selected: None,
+            folder: None,
+            folder_files: Vec::new(),
+            folder_sel: None,
             confirm: None,
+            confirm_dir: None,
             message: None,
         }
     }
 
-    /// Whether the bottom action bar (for a selected large file) is shown.
+    /// Whether the bottom action bar (for a selected file or folder) is shown.
     pub fn has_action_bar(&self) -> bool {
-        self.tab == Tab::Large && self.result.is_some()
+        self.tab != Tab::Junk && self.result.is_some()
     }
 
     fn is_scanning(&self) -> bool {
@@ -154,26 +176,29 @@ impl CleanupScreen {
         ui.add_space(14.0);
 
         let mut new_tab = None;
-        ui.allocate_ui(vec2(420.0, 36.0), |ui| {
+        const TABS: [Tab; 3] = [Tab::Junk, Tab::Large, Tab::Folders];
+        ui.allocate_ui(vec2(600.0, 36.0), |ui| {
             let tabs = [
                 (icon::SPARKLE, "Systeem opschonen", "Tijdelijke bestanden en caches verwijderen"),
                 (icon::FILE, "Grote bestanden", "Je eigen grootste bestanden bekijken"),
+                (icon::FOLDER, "Grote mappen", "Je eigen mappen op grootte bekijken"),
             ];
-            let active = if self.tab == Tab::Junk { 0 } else { 1 };
+            let active = TABS.iter().position(|&t| t == self.tab).unwrap_or(0);
             new_tab = ui::segmented_tabs(ui, tabs, active);
         });
         if let Some(i) = new_tab {
-            self.tab = if i == 0 { Tab::Junk } else { Tab::Large };
+            self.tab = TABS[i];
             self.message = None;
         }
         ui.add_space(14.0);
 
         match self.tab {
             Tab::Junk => self.draw_junk(ui),
-            Tab::Large => self.draw_large(ui, volumes),
+            Tab::Large | Tab::Folders => self.draw_large(ui, volumes),
         }
         self.draw_junk_confirm(ui.ctx());
         self.draw_recycle_confirm(ui.ctx());
+        self.draw_folder_confirm(ui.ctx());
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
@@ -380,7 +405,10 @@ impl CleanupScreen {
             ui.add_space(12.0);
         }
         if self.result.is_some() {
-            self.draw_file_list(ui);
+            match self.tab {
+                Tab::Folders => self.draw_folders(ui),
+                _ => self.draw_file_list(ui),
+            }
         } else if !self.is_scanning() {
             ui::empty_card(ui, icon::MAGNIFYING_GLASS, "Kies een schijf of map en klik op Scannen.");
         }
@@ -408,6 +436,9 @@ impl CleanupScreen {
 
         self.result = None;
         self.selected = None;
+        self.folder = None;
+        self.folder_files.clear();
+        self.folder_sel = None;
         self.message = None;
         self.scan = Some(CleanupScan {
             cancel,
@@ -455,7 +486,8 @@ impl CleanupScreen {
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!scanning, |ui| {
                     ui.label(egui::RichText::new(icon::FUNNEL).font(theme::icon(18.0)).color(theme::TEXT_DIM));
-                    ui.label(egui::RichText::new("Bestanden vanaf").color(theme::TEXT_DIM));
+                    let what = if self.tab == Tab::Folders { "Mappen en bestanden vanaf" } else { "Bestanden vanaf" };
+                    ui.label(egui::RichText::new(what).color(theme::TEXT_DIM));
                     egui::ComboBox::from_id_salt("cleanup_min_size")
                         .width(90.0)
                         .selected_text(MIN_SIZES[self.min_size].0)
@@ -502,6 +534,24 @@ impl CleanupScreen {
             .filter(|&used| used > 0)
             .map_or(0.0, |used| bytes as f32 / used as f32);
         let cancel = scan.cancel.clone();
+
+        // Once done, one line is enough; the space goes to the results.
+        if completed {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(icon::CHECK_CIRCLE).font(theme::icon(16.0)).color(theme::SUCCESS));
+                ui.label(egui::RichText::new("Scan voltooid").font(theme::font_semibold(14.0)));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} doorzocht · {} · {}",
+                        ui::fmt_files(files as usize),
+                        disk::format_size(bytes),
+                        ui::fmt_duration(elapsed)
+                    ))
+                    .color(theme::TEXT_DIM),
+                );
+            });
+            return;
+        }
 
         theme::card_frame().inner_margin(egui::Margin::symmetric(18.0, 14.0)).show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -594,22 +644,170 @@ impl CleanupScreen {
         }
     }
 
+    /// "Grote mappen": the overview of the user's own folders, or the
+    /// subfolders and files of the folder that is open.
+    fn draw_folders(&mut self, ui: &mut egui::Ui) {
+        let Some(result) = self.result.as_ref() else {
+            return;
+        };
+        let min_size = MIN_SIZES[self.min_size].1;
+        let min = MIN_SIZES[self.min_size].0;
+        let dirs: Vec<usize> = match self.folder {
+            None => result.top_folders(),
+            Some(f) => result.dirs[f].children.clone(),
+        }
+        .into_iter()
+        .filter(|&d| result.dirs[d].size >= min_size)
+        .collect();
+        let files: Vec<usize> = (0..self.folder_files.len()).filter(|&i| self.folder_files[i].size >= min_size).collect();
+
+        // Breadcrumb: up button, "Alle mappen" and the open folder's path.
+        let mut go_to: Option<Option<usize>> = None;
+        ui.horizontal(|ui| {
+            let up = ui.add_enabled_ui(self.folder.is_some(), |ui| ui::icon_button(ui, icon::ARROW_UP, "Map omhoog"));
+            if up.inner.clicked() {
+                go_to = Some(self.folder.and_then(|f| result.dirs[f].parent).filter(|&p| !is_top(result, p)));
+            }
+            ui.add_space(4.0);
+            let mut chain = Vec::new();
+            let mut cur = self.folder;
+            while let Some(i) = cur.filter(|&i| !is_top(result, i)) {
+                chain.push(i);
+                cur = result.dirs[i].parent;
+            }
+            chain.reverse();
+            if crumb(ui, "Alle mappen", self.folder.is_none()) {
+                go_to = Some(None);
+            }
+            for &i in &chain {
+                ui.label(egui::RichText::new(icon::CARET_RIGHT).font(theme::icon(14.0)).color(theme::TEXT_FAINT));
+                if crumb(ui, &result.dirs[i].name.to_string_lossy(), Some(i) == self.folder) {
+                    go_to = Some(Some(i));
+                }
+            }
+        });
+        let summary = match self.folder {
+            None => format!("{} mappen van minimaal {min}, grootste eerst", ui::fmt_thousands(dirs.len() as u64)),
+            Some(f) => format!(
+                "{} · {} submappen en {} van minimaal {min}",
+                disk::format_size(result.dirs[f].size),
+                ui::fmt_thousands(dirs.len() as u64),
+                ui::fmt_files(files.len())
+            ),
+        };
+        ui.label(egui::RichText::new(summary).size(12.5).color(theme::TEXT_DIM));
+        ui.add_space(8.0);
+
+        let rows = dirs.len() + files.len();
+        if rows == 0 {
+            ui::empty_card(ui, icon::CHECK_CIRCLE, "Geen eigen mappen of bestanden boven deze grootte.");
+        } else {
+            let mut clicked = None;
+            let mut opened = None;
+            let parent_size = self.folder.map(|f| result.dirs[f].size);
+            egui::ScrollArea::vertical()
+                .id_salt(("cleanup_folders", self.folder))
+                .auto_shrink([false, false])
+                .show_rows(ui, ROW_H + ROW_GAP, rows, |ui, range| {
+                    ui.spacing_mut().item_spacing.y = ROW_GAP;
+                    for r in range {
+                        let (sel, row) = if let Some(&d) = dirs.get(r) {
+                            let node = &result.dirs[d];
+                            let mut sub = ui::fmt_files(node.files as usize);
+                            if let Some(total) = parent_size.filter(|&t| t > 0) {
+                                sub = format!("{} · {sub}", percent(node.size, total));
+                            }
+                            if self.folder.is_none() {
+                                sub = format!("{sub} · {}", result.dir_path(d).display());
+                            }
+                            let name = node.name.to_string_lossy();
+                            let selected = self.folder_sel == Some(FolderSel::Dir(d));
+                            (FolderSel::Dir(d), folder_row(ui, &name, &sub, node.size, selected))
+                        } else {
+                            let i = files[r - dirs.len()];
+                            let f = &self.folder_files[i];
+                            let name = file_name(&f.path);
+                            let (glyph, color) = ui::category_style(ntfs::category_for_name(&name));
+                            let sub = parent_size.filter(|&t| t > 0).map(|t| format!("{} van deze map", percent(f.size, t)));
+                            let selected = self.folder_sel == Some(FolderSel::File(i));
+                            let row = result_row(ui, glyph, color, &name, &sub.unwrap_or_default(), f.size, selected);
+                            (FolderSel::File(i), (row, false))
+                        };
+                        let (resp, chevron) = row;
+                        if resp.double_clicked() || chevron {
+                            opened = Some(sel);
+                        } else if resp.clicked() {
+                            clicked = Some(sel);
+                        }
+                    }
+                });
+            if let Some(sel) = clicked {
+                self.folder_sel = Some(sel);
+            }
+            match opened {
+                Some(FolderSel::Dir(d)) => go_to = Some(Some(d)),
+                Some(sel @ FolderSel::File(_)) => {
+                    self.folder_sel = Some(sel);
+                    self.open_selected();
+                }
+                None => {}
+            }
+        }
+        if let Some(target) = go_to {
+            self.enter_folder(target);
+        }
+    }
+
+    /// Opens `folder` in the "Grote mappen" tab (`None` = overview).
+    fn enter_folder(&mut self, folder: Option<usize>) {
+        let Some(result) = self.result.as_ref() else {
+            return;
+        };
+        self.folder_files = folder.map(|f| largefiles::list_files(&result.dir_path(f))).unwrap_or_default();
+        self.folder = folder;
+        self.folder_sel = None;
+    }
+
+    /// Path and size of what the action bar acts on in the active tab.
+    fn selection(&self) -> Option<(PathBuf, u64)> {
+        match self.tab {
+            Tab::Folders => match self.folder_sel? {
+                FolderSel::Dir(d) => {
+                    let result = self.result.as_ref()?;
+                    Some((result.dir_path(d), result.dirs[d].size))
+                }
+                FolderSel::File(i) => self.folder_files.get(i).map(|f| (f.path.clone(), f.size)),
+            },
+            _ => self.selected_file().map(|f| (f.path.clone(), f.size)),
+        }
+    }
+
     fn selected_file(&self) -> Option<&LargeFile> {
-        self.result.as_ref()?.files.get(self.selected?)
+        match self.tab {
+            Tab::Folders => match self.folder_sel? {
+                FolderSel::File(i) => self.folder_files.get(i),
+                FolderSel::Dir(_) => None,
+            },
+            _ => self.result.as_ref()?.files.get(self.selected?),
+        }
     }
 
     pub fn draw_action_bar(&mut self, ui: &mut egui::Ui) {
-        let selection = self.selected_file().cloned();
+        let selection = self.selection();
+        let can_recycle = selection.as_ref().is_some_and(|(p, _)| {
+            !largefiles::is_system_or_app(p) && !(p.is_dir() && largefiles::is_container(p))
+        });
         let mut open = false;
         let mut recycle = false;
         ui.horizontal_centered(|ui| {
             match &selection {
-                Some(f) => {
-                    ui.label(egui::RichText::new(file_name(&f.path)).font(theme::font_semibold(14.0)));
-                    ui.label(egui::RichText::new(disk::format_size(f.size)).color(theme::TEXT_DIM));
+                Some((path, size)) => {
+                    ui.label(egui::RichText::new(file_name(path)).font(theme::font_semibold(14.0)));
+                    ui.label(egui::RichText::new(disk::format_size(*size)).color(theme::TEXT_DIM));
                 }
                 None => {
-                    ui.label(egui::RichText::new("Selecteer een bestand").color(theme::TEXT_DIM));
+                    let hint = if self.tab == Tab::Folders { "Selecteer een map of bestand" } else { "Selecteer een bestand" };
+                    ui.label(egui::RichText::new(hint).color(theme::TEXT_DIM));
                 }
             }
             if let Some((text, success)) = &self.message {
@@ -624,7 +822,11 @@ impl CleanupScreen {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let button = ui::danger_icon_button(icon::TRASH, "Naar prullenbak").min_size(vec2(160.0, 38.0));
-                recycle = ui.add_enabled(selection.is_some(), button).clicked();
+                let resp = ui.add_enabled(can_recycle, button);
+                if selection.is_some() && !can_recycle {
+                    resp.clone().on_disabled_hover_text("Deze map bevat andere mappen en kan niet in één keer weg.");
+                }
+                recycle = resp.clicked();
                 let button =
                     ui::secondary_icon_button(icon::ARROW_SQUARE_OUT, "Open in Verkenner").min_size(vec2(170.0, 38.0));
                 open = ui.add_enabled(selection.is_some(), button).clicked();
@@ -634,15 +836,80 @@ impl CleanupScreen {
             self.open_selected();
         }
         if recycle {
-            self.confirm = selection;
+            match (self.tab, self.folder_sel) {
+                (Tab::Folders, Some(FolderSel::Dir(d))) => self.confirm_dir = Some(d),
+                _ => self.confirm = self.selected_file().cloned(),
+            }
         }
     }
 
     fn open_selected(&mut self) {
-        if let Some(path) = self.selected_file().map(|f| f.path.clone()) {
+        if let Some((path, _)) = self.selection() {
             if let Err(e) = largefiles::show_in_explorer(&path) {
                 self.message = Some((format!("Verkenner openen mislukt: {e}"), false));
             }
+        }
+    }
+
+    fn draw_folder_confirm(&mut self, ctx: &egui::Context) {
+        let (Some(d), Some(result)) = (self.confirm_dir, self.result.as_ref()) else {
+            return;
+        };
+        let path = result.dir_path(d);
+        let (size, files) = (result.dirs[d].size, result.dirs[d].files);
+        let mut decision = None;
+        dim_background(ctx);
+        dialog("cleanup_folder_confirm", ctx, |ui| {
+            let sub = format!("{} · {} · {}", file_name(&path), disk::format_size(size), ui::fmt_files(files as usize));
+            dialog_title(ui, icon::TRASH, theme::DANGER, "Hele map naar de prullenbak?", &sub);
+            ui.add(egui::Label::new(egui::RichText::new(path.display().to_string()).size(12.0).color(theme::TEXT_DIM)).wrap());
+            ui.add_space(4.0);
+            notice(
+                ui,
+                icon::WARNING_CIRCLE,
+                theme::DANGER,
+                "De map gaat met alle submappen en bestanden naar de prullenbak. Controleer eerst in Verkenner \
+                 of er niets in staat dat je nog nodig hebt.",
+            );
+            notice(
+                ui,
+                icon::INFO,
+                theme::ACCENT,
+                "Je kunt de map terugzetten vanuit de prullenbak. De ruimte komt pas vrij als je de prullenbak \
+                 leegt. Is de map te groot voor de prullenbak, dan vraagt Windows eerst of hij definitief weg mag.",
+            );
+            ui.add_space(8.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(ui::danger_icon_button(icon::TRASH, "Naar prullenbak").min_size(vec2(150.0, 36.0))).clicked() {
+                    decision = Some(true);
+                }
+                if ui.add(ui::secondary_icon_button(icon::X, "Annuleren").min_size(vec2(120.0, 36.0))).clicked() {
+                    decision = Some(false);
+                }
+            });
+        });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            decision = Some(false);
+        }
+        match decision {
+            Some(true) => {
+                self.confirm_dir = None;
+                let name = file_name(&path);
+                match largefiles::move_to_recycle_bin(&path) {
+                    Ok(true) => {
+                        if let Some(result) = self.result.as_mut() {
+                            result.remove_dir(d);
+                        }
+                        self.folder_sel = None;
+                        self.message = Some((format!("{name} ({}) staat in de prullenbak.", disk::format_size(size)), true));
+                        self.junk.measures = vec![None; junk::ALL.len()];
+                    }
+                    Ok(false) => self.message = Some((format!("{name} is niet verwijderd."), false)),
+                    Err(e) => self.message = Some((format!("{name}: {e}"), false)),
+                }
+            }
+            Some(false) => self.confirm_dir = None,
+            None => {}
         }
     }
 
@@ -699,9 +966,12 @@ impl CleanupScreen {
         match largefiles::move_to_recycle_bin(&file.path) {
             Ok(true) => {
                 if let Some(result) = self.result.as_mut() {
-                    result.files.retain(|f| f.path != file.path);
+                    let folder = file.path.parent().and_then(|p| result.find_dir(p));
+                    result.remove_file(folder, file);
                 }
+                self.folder_files.retain(|f| f.path != file.path);
                 self.selected = None;
+                self.folder_sel = None;
                 self.message = Some((format!("{name} ({}) staat in de prullenbak.", disk::format_size(file.size)), true));
                 // The Recycle Bin grew; show its new size in the other tab.
                 self.junk.measures = vec![None; junk::ALL.len()];
@@ -798,6 +1068,63 @@ fn result_row(
     ui.painter().galley(pos2(x, rect.top() + 33.0), s, theme::TEXT_DIM);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(format!("{subtitle}\nDubbelklik om te openen in Verkenner"))
+}
+
+/// One folder row with a chevron that opens it. Returns the row response
+/// and whether the chevron was clicked.
+fn folder_row(ui: &mut egui::Ui, title: &str, subtitle: &str, size: u64, selected: bool) -> (egui::Response, bool) {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width() - 8.0, ROW_H), Sense::click());
+    ui::paint_card(ui, rect, resp.hovered(), selected);
+    let tile = Rect::from_min_size(rect.min + vec2(12.0, 11.0), vec2(38.0, 38.0));
+    ui::icon_tile(ui, tile, icon::FOLDER, theme::ACCENT, 20.0);
+
+    let chevron = Rect::from_center_size(pos2(rect.right() - 26.0, rect.center().y), vec2(36.0, 36.0));
+    let on_chevron = resp.hover_pos().is_some_and(|p| chevron.contains(p));
+    if on_chevron {
+        ui.painter().rect_filled(chevron, 8.0, theme::ACCENT_SOFT);
+    }
+    ui.painter().text(
+        chevron.center(),
+        egui::Align2::CENTER_CENTER,
+        icon::CARET_RIGHT,
+        theme::icon(16.0),
+        if resp.hovered() { theme::ACCENT } else { theme::TEXT_FAINT },
+    );
+    let size_galley = ui.painter().layout_no_wrap(disk::format_size(size), theme::font_semibold(14.0), theme::TEXT_MAIN);
+    let size_x = chevron.left() - 8.0 - size_galley.size().x;
+    ui.painter().galley(pos2(size_x, rect.center().y - size_galley.size().y / 2.0), size_galley, theme::TEXT_MAIN);
+
+    let x = tile.right() + 12.0;
+    let max_w = size_x - 16.0 - x;
+    let (t, _) = ui::elided(ui, title, theme::font_medium(14.0), theme::TEXT_MAIN, max_w);
+    let (s, _) = ui::elided(ui, subtitle, theme::font(12.0), theme::TEXT_DIM, max_w);
+    ui.painter().galley(pos2(x, rect.top() + 12.0), t, theme::TEXT_MAIN);
+    ui.painter().galley(pos2(x, rect.top() + 33.0), s, theme::TEXT_DIM);
+    let chevron_clicked = resp.clicked() && resp.interact_pointer_pos().is_some_and(|p| chevron.contains(p));
+    let resp = resp
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Klik om te selecteren, dubbelklik of klik op › om de map te openen");
+    (resp, chevron_clicked)
+}
+
+/// Breadcrumb part; the current one is dark, the others are links.
+/// Returns whether a link was clicked.
+fn crumb(ui: &mut egui::Ui, text: &str, current: bool) -> bool {
+    let color = if current { theme::TEXT_MAIN } else { theme::ACCENT };
+    let label = egui::Label::new(egui::RichText::new(text).font(theme::font_semibold(15.0)).color(color));
+    let resp = ui.add(label.sense(Sense::click()));
+    !current && resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// Whether folder `index` is the root or a container shown only through
+/// its contents (so it is skipped in the breadcrumb).
+fn is_top(result: &CleanupResult, index: usize) -> bool {
+    index == 0 || largefiles::is_container(&result.dir_path(index))
+}
+
+/// "12,5%" with a Dutch decimal comma.
+fn percent(part: u64, total: u64) -> String {
+    format!("{:.1}%", part as f64 * 100.0 / total as f64).replace('.', ",")
 }
 
 /// Selectable location card (a drive or "Map kiezen…"). Returns whether clicked.

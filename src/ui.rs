@@ -294,12 +294,12 @@ pub fn nav_item(ui: &mut Ui, glyph: &str, label: &str, active: bool) -> Response
     resp
 }
 
-/// Two-segment pill toggle that fills the available width. Each segment is
+/// Pill toggle with one segment per item that fills the available width. Each segment is
 /// (icon, label, tooltip) on a single line with a fixed height; when space
 /// runs out the icon is dropped first, then the label is elided.
-pub fn segmented_tabs(ui: &mut Ui, items: [(&str, &str, &str); 2], active: usize) -> Option<usize> {
+pub fn segmented_tabs<const N: usize>(ui: &mut Ui, items: [(&str, &str, &str); N], active: usize) -> Option<usize> {
     let width = ui.available_width();
-    let half = width / 2.0;
+    let half = width / N as f32;
     let height = 36.0;
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     ui.painter().rect_filled(rect, 9.0, theme::SUBTLE_BG);
