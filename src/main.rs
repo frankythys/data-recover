@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod apps;
+mod apps_view;
 mod cleanup;
 mod disk;
 mod fat;

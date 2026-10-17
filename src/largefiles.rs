@@ -360,18 +360,24 @@ pub fn show_in_explorer(_path: &Path) -> io::Result<()> {
 /// cancelled Windows' "te groot voor de prullenbak" warning.
 #[cfg(windows)]
 pub fn move_to_recycle_bin(path: &Path) -> io::Result<bool> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::UI::Shell::{
-        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW, SHFileOperationW,
-    };
-    use windows::core::PCWSTR;
-
     if is_system_or_app(path) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "systeem- of programmabestand, niet verwijderd"));
     }
     if path.is_dir() && is_container(path) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "deze map bevat andere mappen en kan niet in één keer weg"));
     }
+    recycle_unchecked(path)
+}
+
+/// [`move_to_recycle_bin`] without the safety checks; callers check first.
+#[cfg(windows)]
+pub fn recycle_unchecked(path: &Path) -> io::Result<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::Shell::{
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW, SHFileOperationW,
+    };
+    use windows::core::PCWSTR;
+
     // pFrom is a list of paths ending with an extra NUL.
     let from: Vec<u16> = path.as_os_str().encode_wide().chain([0, 0]).collect();
     // FOF_WANTNUKEWARNING: without it Windows silently deletes files that are
@@ -397,6 +403,11 @@ pub fn move_to_recycle_bin(path: &Path) -> io::Result<bool> {
 
 #[cfg(not(windows))]
 pub fn move_to_recycle_bin(_path: &Path) -> io::Result<bool> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "Alleen op Windows"))
+}
+
+#[cfg(not(windows))]
+pub fn recycle_unchecked(_path: &Path) -> io::Result<bool> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "Alleen op Windows"))
 }
 

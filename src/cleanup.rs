@@ -1,10 +1,12 @@
-//! "Schijf opruimen" screen, in three tabs:
+//! "Schijf opruimen" screen, in four tabs:
 //! - "Systeem opschonen": caches and temporary files, cleaned in one go.
+//! - "Programma's": big program data (see `apps_view`).
 //! - "Grote bestanden": the user's own largest files.
 //! - "Grote mappen": the user's own folders by size, to browse into.
 //! Files and folders can be opened in Explorer or moved to the Recycle Bin.
 //! Windows and program files and folders are never listed.
 
+use crate::apps_view::AppsView;
 use crate::disk::{self, VolumeInfo};
 use crate::junk::{self, CleanReport, Kind, Measure};
 use crate::largefiles::{self, CleanupProgress, CleanupResult, LargeFile};
@@ -24,12 +26,13 @@ const MIN_SIZES: [(&str, u64); 4] = [
     ("500 MB", 500 << 20),
     ("1 GB", 1 << 30),
 ];
-const ROW_H: f32 = 60.0;
-const ROW_GAP: f32 = 8.0;
+pub(crate) const ROW_H: f32 = 60.0;
+pub(crate) const ROW_GAP: f32 = 8.0;
 
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
     Junk,
+    Programs,
     Large,
     Folders,
 }
@@ -121,6 +124,7 @@ struct CleanupScan {
 pub struct CleanupScreen {
     tab: Tab,
     junk: JunkState,
+    apps: AppsView,
     root: String,
     min_size: usize,
     scan: Option<CleanupScan>,
@@ -143,6 +147,7 @@ impl CleanupScreen {
         Self {
             tab: Tab::Junk,
             junk: JunkState::new(),
+            apps: AppsView::new(),
             root: "C:\\".to_string(),
             min_size: 1,
             scan: None,
@@ -159,7 +164,11 @@ impl CleanupScreen {
 
     /// Whether the bottom action bar (for a selected file or folder) is shown.
     pub fn has_action_bar(&self) -> bool {
-        self.tab != Tab::Junk && self.result.is_some()
+        match self.tab {
+            Tab::Junk => false,
+            Tab::Programs => self.apps.has_action_bar(),
+            Tab::Large | Tab::Folders => self.result.is_some(),
+        }
     }
 
     fn is_scanning(&self) -> bool {
@@ -176,10 +185,11 @@ impl CleanupScreen {
         ui.add_space(14.0);
 
         let mut new_tab = None;
-        const TABS: [Tab; 3] = [Tab::Junk, Tab::Large, Tab::Folders];
-        ui.allocate_ui(vec2(600.0, 36.0), |ui| {
+        const TABS: [Tab; 4] = [Tab::Junk, Tab::Programs, Tab::Large, Tab::Folders];
+        ui.allocate_ui(vec2(780.0, 36.0), |ui| {
             let tabs = [
                 (icon::SPARKLE, "Systeem opschonen", "Tijdelijke bestanden en caches verwijderen"),
+                (icon::APP_WINDOW, "Programma's", "AI-modellen, emulators, Docker en caches van programma's"),
                 (icon::FILE, "Grote bestanden", "Je eigen grootste bestanden bekijken"),
                 (icon::FOLDER, "Grote mappen", "Je eigen mappen op grootte bekijken"),
             ];
@@ -194,7 +204,12 @@ impl CleanupScreen {
 
         match self.tab {
             Tab::Junk => self.draw_junk(ui),
+            Tab::Programs => self.apps.draw(ui),
             Tab::Large | Tab::Folders => self.draw_large(ui, volumes),
+        }
+        if self.apps.take_recycled() {
+            // The Recycle Bin grew; remeasure it in "Systeem opschonen".
+            self.junk.measures = vec![None; junk::ALL.len()];
         }
         self.draw_junk_confirm(ui.ctx());
         self.draw_recycle_confirm(ui.ctx());
@@ -793,6 +808,10 @@ impl CleanupScreen {
     }
 
     pub fn draw_action_bar(&mut self, ui: &mut egui::Ui) {
+        if self.tab == Tab::Programs {
+            self.apps.draw_action_bar(ui);
+            return;
+        }
         let selection = self.selection();
         let can_recycle = selection.as_ref().is_some_and(|(p, _)| {
             !largefiles::is_system_or_app(p) && !(p.is_dir() && largefiles::is_container(p))
@@ -1042,7 +1061,7 @@ fn junk_row(ui: &mut egui::Ui, kind: Kind, measure: Option<Measure>, checked: bo
 }
 
 /// One large file: icon, name, folder and size on the right.
-fn result_row(
+pub(crate) fn result_row(
     ui: &mut egui::Ui,
     glyph: &str,
     color: egui::Color32,
@@ -1146,13 +1165,13 @@ fn location_chip(ui: &mut egui::Ui, glyph: &str, title: &str, subtitle: &str, se
 }
 
 /// Darkens the app behind a dialog.
-fn dim_background(ctx: &egui::Context) {
+pub(crate) fn dim_background(ctx: &egui::Context) {
     ctx.layer_painter(egui::LayerId::new(egui::Order::PanelResizeLine, egui::Id::new("cleanup_dim")))
         .rect_filled(ctx.screen_rect(), 0.0, egui::Color32::from_black_alpha(70));
 }
 
 /// Centered card-style dialog.
-fn dialog(id: &str, ctx: &egui::Context, content: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn dialog(id: &str, ctx: &egui::Context, content: impl FnOnce(&mut egui::Ui)) {
     egui::Window::new(id)
         .title_bar(false)
         .collapsible(false)
@@ -1166,7 +1185,7 @@ fn dialog(id: &str, ctx: &egui::Context, content: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
-fn dialog_title(ui: &mut egui::Ui, glyph: &str, color: egui::Color32, title: &str, subtitle: &str) {
+pub(crate) fn dialog_title(ui: &mut egui::Ui, glyph: &str, color: egui::Color32, title: &str, subtitle: &str) {
     ui.horizontal(|ui| {
         let (tile, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
         ui::icon_tile(ui, tile, glyph, color, 23.0);
@@ -1179,7 +1198,7 @@ fn dialog_title(ui: &mut egui::Ui, glyph: &str, color: egui::Color32, title: &st
 }
 
 /// Tinted info line with an icon, wrapped to the available width.
-fn notice(ui: &mut egui::Ui, glyph: &str, color: egui::Color32, text: &str) {
+pub(crate) fn notice(ui: &mut egui::Ui, glyph: &str, color: egui::Color32, text: &str) {
     egui::Frame::none()
         .fill(theme::tint(color, 0.10))
         .rounding(egui::Rounding::same(8.0))
@@ -1193,7 +1212,7 @@ fn notice(ui: &mut egui::Ui, glyph: &str, color: egui::Color32, text: &str) {
         });
 }
 
-fn file_name(path: &Path) -> String {
+pub(crate) fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
