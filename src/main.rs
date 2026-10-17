@@ -352,6 +352,8 @@ impl DataRecovererApp {
 
         let status_height = 110.0;
         egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .max_height((ui.available_height() - status_height).max(0.0))
             .show(ui, |ui| {
                 if found_snapshot.is_empty() {
@@ -422,7 +424,14 @@ impl DataRecovererApp {
                     .last()
                     .map(|f| f.name.as_str())
                     .unwrap_or("…");
-                ui.colored_label(theme::TEXT_DIM, format!("Scannen: {current}"));
+                // Truncate to one clipped line so a long name never re-flows
+                // the layout (which caused flicker during scanning).
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("Scannen: {current}")).color(theme::TEXT_DIM),
+                    )
+                    .truncate(),
+                );
                 ui.add_space(6.0);
             }
             draw_progress_track(ui, fraction, ui.available_width());
@@ -757,7 +766,7 @@ fn draw_file_card(
                     );
                 }
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new(&found.name).size(11.0))
+                ui.add(egui::Label::new(egui::RichText::new(&found.name).size(11.0)).truncate())
                     .on_hover_text(&found.name);
                 ui.colored_label(theme::TEXT_DIM, disk::format_size(found.size));
                 if overwritten {
