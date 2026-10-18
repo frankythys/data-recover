@@ -16,6 +16,7 @@ pub const TEXT_DIM: Color32 = Color32::from_rgb(107, 115, 133);
 pub const TEXT_FAINT: Color32 = Color32::from_rgb(154, 161, 174);
 pub const DANGER: Color32 = Color32::from_rgb(229, 72, 77);
 pub const SUCCESS: Color32 = Color32::from_rgb(22, 163, 74);
+pub const WARNING: Color32 = Color32::from_rgb(217, 119, 6);
 
 // Per file-category accent colours.
 pub const CAT_PHOTO: Color32 = Color32::from_rgb(245, 158, 11);

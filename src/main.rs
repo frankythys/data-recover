@@ -9,6 +9,8 @@ mod disk;
 mod duplicates;
 mod duplicates_view;
 mod fat;
+mod health;
+mod health_view;
 mod junk;
 mod largefiles;
 mod ntfs;
@@ -34,6 +36,7 @@ enum Screen {
     Home,
     Browse,
     Cleanup,
+    Health,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -120,6 +123,7 @@ struct DataRecovererApp {
     message: Option<(String, bool)>,
     /// "Grote bestanden" screen; keeps its scan when switching screens.
     cleanup: cleanup::CleanupScreen,
+    health: health_view::HealthView,
 }
 
 impl DataRecovererApp {
@@ -138,6 +142,7 @@ impl DataRecovererApp {
             previews: preview::PreviewLoader::new(ctx),
             message: None,
             cleanup: cleanup::CleanupScreen::new(),
+            health: health_view::HealthView::new(),
         }
     }
 }
@@ -319,6 +324,12 @@ impl DataRecovererApp {
         let cleanup = matches!(self.screen, Screen::Cleanup);
         if ui::nav_item(ui, icon::BROOM, "Schijf opruimen", cleanup).clicked() {
             self.screen = Screen::Cleanup;
+        }
+        ui.add_space(6.0);
+        ui::sidebar_caption(ui, "Schijftools");
+        let health = matches!(self.screen, Screen::Health);
+        if ui::nav_item(ui, icon::HEARTBEAT, "Schijfgezondheid", health).clicked() {
+            self.screen = Screen::Health;
         }
     }
 
@@ -973,7 +984,7 @@ impl eframe::App for DataRecovererApp {
                     .stroke(egui::Stroke::new(1.0_f32, theme::CARD_BORDER)),
             )
             .show(ctx, |ui| match self.screen {
-                Screen::Home | Screen::Cleanup => self.draw_sidebar_home(ui),
+                Screen::Home | Screen::Cleanup | Screen::Health => self.draw_sidebar_home(ui),
                 Screen::Browse => self.draw_browse_tree(ui),
             });
 
@@ -1010,6 +1021,7 @@ impl eframe::App for DataRecovererApp {
                 Screen::Home => self.draw_home(ui, ctx),
                 Screen::Browse => self.draw_browse(ui),
                 Screen::Cleanup => self.cleanup.draw(ui, &self.volumes),
+                Screen::Health => self.health.draw(ui, &self.volumes),
             });
     }
 }
