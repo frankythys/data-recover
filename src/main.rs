@@ -16,6 +16,8 @@ mod imaging_view;
 mod junk;
 mod largefiles;
 mod ntfs;
+mod partition_ops;
+mod partition_ops_view;
 mod partitions;
 mod partitions_view;
 mod preview;
@@ -1080,6 +1082,9 @@ impl eframe::App for DataRecovererApp {
                 Screen::Partitions => {
                     if let Some(req) = self.partitions.draw(ui, &self.volumes) {
                         self.start_scan_at(req.path, Some(req.start), req.label, Scope::Drive, ctx);
+                    }
+                    if self.partitions.take_changed() {
+                        self.volumes = disk::list_volumes();
                     }
                 }
                 Screen::Imaging => {

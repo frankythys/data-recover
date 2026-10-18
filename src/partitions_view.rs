@@ -1,10 +1,13 @@
 //! "Partities" screen: per physical disk a bar and a list of its
-//! partitions and unpartitioned space, and a search of that space for lost
-//! partitions, which can then be scanned for files.
+//! partitions and unpartitioned space, operations on a selected partition
+//! (see `partition_ops_view`), and a search of the unpartitioned space for
+//! lost partitions, which can then be scanned for files.
 
 use crate::cleanup::notice;
 use crate::disk::{self, VolumeInfo};
 use crate::health::{self, DiskHealth};
+use crate::partition_ops::Guard;
+use crate::partition_ops_view::{self, OpsPanel, Request, Selection};
 use crate::partitions::{self, FoundPartition, Layout, PartInfo, PartKind, SearchProgress, Style};
 use crate::{theme, ui};
 use egui::{Rect, Sense, pos2, vec2};
@@ -48,11 +51,43 @@ pub struct PartitionsView {
     search: Option<SearchJob>,
     /// Search result per disk.
     results: HashMap<u32, Result<Vec<FoundPartition>, String>>,
+    selected: Option<Selection>,
+    ops: OpsPanel,
+    /// Set when partitions changed, so the app rereads its drive list.
+    changed: bool,
 }
 
 impl PartitionsView {
     pub fn new() -> Self {
-        Self { layouts: Vec::new(), models: HashMap::new(), rx: None, loaded: false, search: None, results: HashMap::new() }
+        Self {
+            layouts: Vec::new(),
+            models: HashMap::new(),
+            rx: None,
+            loaded: false,
+            search: None,
+            results: HashMap::new(),
+            selected: None,
+            ops: OpsPanel::default(),
+            changed: false,
+        }
+    }
+
+    /// Whether partitions were changed since the last call.
+    pub fn take_changed(&mut self) -> bool {
+        std::mem::take(&mut self.changed)
+    }
+
+    fn guard(&self, volumes: &[VolumeInfo]) -> Guard {
+        let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+        Guard {
+            windows_disk: volumes.iter().find(|v| v.letter.eq_ignore_ascii_case(&system_drive)).and_then(|v| v.disk_index),
+            system_parts: self
+                .layouts
+                .iter()
+                .flat_map(|l| l.partitions.iter().filter(|p| p.kind.is_system()).map(move |p| (l.index, p.number)))
+                .collect(),
+            used_letters: volumes.iter().filter_map(|v| v.letter.chars().next()).collect(),
+        }
     }
 
     fn reload(&mut self, ctx: &egui::Context) {
@@ -134,6 +169,15 @@ impl PartitionsView {
             self.reload(ui.ctx());
         }
         ui.add_space(14.0);
+        self.ops.draw_queue(ui);
+        if self.ops.take_changed() {
+            self.reload(ui.ctx());
+            self.selected = None;
+            self.changed = true;
+        }
+        ui.add_space(8.0);
+        let guard = self.guard(volumes);
+        self.ops.draw_dialogs(ui.ctx(), &guard);
         if self.layouts.is_empty() {
             if !loading {
                 ui::empty_card(ui, icon::INFO, "Geen schijven gevonden.");
@@ -144,6 +188,8 @@ impl PartitionsView {
         let mut search = None;
         let mut scan = None;
         let mut stop = false;
+        let mut select = None;
+        let mut request: Option<Request> = None;
         egui::ScrollArea::vertical().id_salt("partitions").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 12.0;
             for layout in &self.layouts {
@@ -152,6 +198,8 @@ impl PartitionsView {
                 match action {
                     Some(CardAction::Search) => search = Some(layout.clone()),
                     Some(CardAction::Stop) => stop = true,
+                    Some(CardAction::Select(sel)) => select = Some(sel),
+                    Some(CardAction::Op(req)) => request = Some(req),
                     Some(CardAction::Scan(f)) => {
                         scan = Some(ScanRequest {
                             path: format!(r"\\.\PhysicalDrive{}", layout.index),
@@ -165,6 +213,12 @@ impl PartitionsView {
         });
         if let Some(layout) = search {
             self.start_search(&layout, ui.ctx());
+        }
+        if let Some(sel) = select {
+            self.selected = Some(sel);
+        }
+        if let Some(req) = request {
+            self.ops.open(req, ui.ctx());
         }
         if stop {
             if let Some(job) = &self.search {
@@ -211,12 +265,18 @@ impl PartitionsView {
                 let rect = Rect::from_min_max(pos2(x0, bar.top()), pos2(x1, bar.bottom())).shrink2(vec2(1.0, 0.0));
                 let color = seg.color();
                 ui.painter().rect_filled(rect, 4.0, color);
-                if matches!(seg, Segment::Free(..)) {
+                let sel = seg.selection(layout.index);
+                if self.selected == Some(sel) {
+                    ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(2.5_f32, theme::TEXT_MAIN));
+                } else if matches!(seg, Segment::Free(..)) {
                     ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, theme::CARD_BORDER));
                 }
                 let name = seg.name(volume_of);
-                let tip = format!("{name}\n{} · begint op {}", disk::format_size(end - start), disk::format_size(start));
-                ui.interact(rect, ui.id().with(("segment", layout.index, i)), Sense::hover()).on_hover_text(tip);
+                let tip = format!("{name}\n{} · begint op {}\nKlik om te selecteren", disk::format_size(end - start), disk::format_size(start));
+                let resp = ui.interact(rect, ui.id().with(("segment", layout.index, i)), Sense::click()).on_hover_text(tip);
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    action = Some(CardAction::Select(sel));
+                }
             }
             ui.add_space(10.0);
 
@@ -233,15 +293,27 @@ impl PartitionsView {
                         Segment::Free(..) => ("Niet-toegewezen", "—"),
                     };
                     let (start, end) = seg.range();
-                    ui.label(egui::RichText::new(seg.name(volume_of)).font(theme::font_medium(13.0)));
+                    let sel = seg.selection(layout.index);
+                    let name = egui::RichText::new(seg.name(volume_of)).font(theme::font_medium(13.0));
+                    if ui.selectable_label(self.selected == Some(sel), name).clicked() {
+                        action = Some(CardAction::Select(sel));
+                    }
                     ui.label(egui::RichText::new(kind).color(theme::TEXT_DIM));
                     ui.label(egui::RichText::new(fs).color(theme::TEXT_DIM));
                     ui.label(disk::format_size(end - start));
                     ui.end_row();
                 }
             });
+            if let Some(sel) = self.selected.filter(|s| s.disk() == layout.index) {
+                ui.add_space(8.0);
+                if let Some(req) = partition_ops_view::action_buttons(ui, sel, layout, volumes, self.ops.busy()) {
+                    action = Some(CardAction::Op(req));
+                }
+            }
             ui.add_space(10.0);
-            action = self.draw_search(ui, layout);
+            if let Some(a) = self.draw_search(ui, layout) {
+                action = Some(a);
+            }
         });
         action
     }
@@ -335,9 +407,18 @@ enum CardAction {
     Search,
     Stop,
     Scan(FoundPartition),
+    Select(Selection),
+    Op(Request),
 }
 
 impl Segment<'_> {
+    fn selection(&self, disk: u32) -> Selection {
+        match self {
+            Segment::Part(p) => Selection::Part { disk, number: p.number },
+            Segment::Free(start, end) => Selection::Free { disk, start: *start, end: *end },
+        }
+    }
+
     fn range(&self) -> (u64, u64) {
         match self {
             Segment::Part(p) => (p.start, p.start + p.size),
