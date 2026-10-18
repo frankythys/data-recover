@@ -1,14 +1,16 @@
-//! "Schijf opruimen" screen, in four tabs:
+//! "Schijf opruimen" screen, in five tabs:
 //! - "Systeem opschonen": caches and temporary files, cleaned in one go.
 //! - "Programma's": big program data (see `apps_view`).
 //! - "Grote bestanden": the user's own largest files.
 //! - "Grote mappen": the user's own folders by size, to browse into.
+//! - "Duplicaten": files with the same contents (see `duplicates_view`).
 //! Files and folders can be opened in Explorer or moved to the Recycle Bin.
 //! Windows and program files and folders are never listed.
 
 use crate::apps_view::AppsView;
 use crate::bulk_view::{self, BulkDelete};
 use crate::disk::{self, VolumeInfo};
+use crate::duplicates_view::DuplicatesView;
 use crate::junk::{self, CleanReport, Kind, Measure};
 use crate::largefiles::{self, CleanupProgress, CleanupResult, LargeFile};
 use crate::{ntfs, theme, ui};
@@ -36,6 +38,7 @@ enum Tab {
     Programs,
     Large,
     Folders,
+    Duplicates,
 }
 
 /// What is selected in the "Grote mappen" tab.
@@ -126,6 +129,7 @@ pub struct CleanupScreen {
     tab: Tab,
     junk: JunkState,
     apps: AppsView,
+    dups: DuplicatesView,
     root: String,
     min_size: usize,
     scan: Option<CleanupScan>,
@@ -150,6 +154,7 @@ impl CleanupScreen {
             tab: Tab::Junk,
             junk: JunkState::new(),
             apps: AppsView::new(),
+            dups: DuplicatesView::new(),
             root: "C:\\".to_string(),
             min_size: 1,
             scan: None,
@@ -171,6 +176,7 @@ impl CleanupScreen {
             Tab::Junk => false,
             Tab::Programs => self.apps.has_action_bar(),
             Tab::Large | Tab::Folders => self.result.is_some(),
+            Tab::Duplicates => self.dups.has_action_bar(),
         }
     }
 
@@ -188,13 +194,14 @@ impl CleanupScreen {
         ui.add_space(14.0);
 
         let mut new_tab = None;
-        const TABS: [Tab; 4] = [Tab::Junk, Tab::Programs, Tab::Large, Tab::Folders];
-        ui.allocate_ui(vec2(780.0, 36.0), |ui| {
+        const TABS: [Tab; 5] = [Tab::Junk, Tab::Programs, Tab::Large, Tab::Folders, Tab::Duplicates];
+        ui.allocate_ui(vec2(960.0, 36.0), |ui| {
             let tabs = [
                 (icon::SPARKLE, "Systeem opschonen", "Tijdelijke bestanden en caches verwijderen"),
                 (icon::APP_WINDOW, "Programma's", "AI-modellen, emulators, Docker en caches van programma's"),
                 (icon::FILE, "Grote bestanden", "Je eigen grootste bestanden bekijken"),
                 (icon::FOLDER, "Grote mappen", "Je eigen mappen op grootte bekijken"),
+                (icon::COPY, "Duplicaten", "Bestanden met dezelfde inhoud vinden en kopieën opruimen"),
             ];
             let active = TABS.iter().position(|&t| t == self.tab).unwrap_or(0);
             new_tab = ui::segmented_tabs(ui, tabs, active);
@@ -209,8 +216,9 @@ impl CleanupScreen {
             Tab::Junk => self.draw_junk(ui),
             Tab::Programs => self.apps.draw(ui),
             Tab::Large | Tab::Folders => self.draw_large(ui, volumes),
+            Tab::Duplicates => self.dups.draw(ui, volumes),
         }
-        if self.apps.take_recycled() {
+        if self.apps.take_recycled() | self.dups.take_recycled() {
             // The Recycle Bin grew; remeasure it in "Systeem opschonen".
             self.junk.measures = vec![None; junk::ALL.len()];
         }
@@ -857,6 +865,10 @@ impl CleanupScreen {
             self.draw_large_action_bar(ui);
             return;
         }
+        if self.tab == Tab::Duplicates {
+            self.dups.draw_action_bar(ui);
+            return;
+        }
         let selection = self.selection();
         let can_recycle = selection.as_ref().is_some_and(|(p, _)| {
             !largefiles::is_system_or_app(p) && !(p.is_dir() && largefiles::is_container(p))
@@ -1237,7 +1249,7 @@ fn percent(part: u64, total: u64) -> String {
 }
 
 /// Selectable location card (a drive or "Map kiezen…"). Returns whether clicked.
-fn location_chip(ui: &mut egui::Ui, glyph: &str, title: &str, subtitle: &str, selected: bool) -> bool {
+pub(crate) fn location_chip(ui: &mut egui::Ui, glyph: &str, title: &str, subtitle: &str, selected: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(250.0, 64.0), Sense::click());
     let enabled = ui.is_enabled();
     ui::paint_card(ui, rect, enabled && resp.hovered(), selected);

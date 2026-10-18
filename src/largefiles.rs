@@ -258,7 +258,7 @@ fn keep_largest(heap: &mut BinaryHeap<Reverse<LargeFile>>, max: usize, make: imp
 /// Cloud placeholders (OneDrive "alleen online") report a size but use no
 /// space on this disk.
 #[cfg(windows)]
-fn takes_local_space(meta: &std::fs::Metadata) -> bool {
+pub(crate) fn takes_local_space(meta: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const OFFLINE: u32 = 0x1000;
     const RECALL_ON_OPEN: u32 = 0x40000;
@@ -267,7 +267,7 @@ fn takes_local_space(meta: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(not(windows))]
-fn takes_local_space(_meta: &std::fs::Metadata) -> bool {
+pub(crate) fn takes_local_space(_meta: &std::fs::Metadata) -> bool {
     true
 }
 

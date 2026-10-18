@@ -6,6 +6,8 @@ mod bulk_view;
 mod cleanup;
 mod deleter;
 mod disk;
+mod duplicates;
+mod duplicates_view;
 mod fat;
 mod junk;
 mod largefiles;
