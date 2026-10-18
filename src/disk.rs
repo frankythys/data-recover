@@ -229,6 +229,23 @@ pub fn list_volumes() -> Vec<VolumeInfo> {
     Vec::new()
 }
 
+/// The user's Desktop folder, also when it was moved (for example to OneDrive).
+#[cfg(windows)]
+pub fn desktop_folder() -> Option<std::path::PathBuf> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Desktop, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+    let path = unsafe { SHGetKnownFolderPath(&FOLDERID_Desktop, KF_FLAG_DEFAULT, HANDLE::default()) }.ok()?;
+    let text = unsafe { path.to_string() };
+    unsafe { CoTaskMemFree(Some(path.0 as *const _)) };
+    text.ok().map(std::path::PathBuf::from)
+}
+
+#[cfg(not(windows))]
+pub fn desktop_folder() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join("Desktop"))
+}
+
 pub fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut size = bytes as f64;

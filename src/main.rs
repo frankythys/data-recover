@@ -13,14 +13,17 @@ mod junk;
 mod largefiles;
 mod ntfs;
 mod preview;
+mod scope;
 mod theme;
 mod ui;
 
 use disk::{DriveKind, VolumeInfo};
 use egui_phosphor::regular as icon;
 use ntfs::{RecoveredFile, ScanProgress};
+use scope::Scope;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
@@ -140,7 +143,9 @@ impl DataRecovererApp {
 }
 
 impl DataRecovererApp {
-    fn start_scan(&mut self, path: String, label: String, ctx: &egui::Context) {
+    /// Starts a scan of `path` (a volume or image) showing the deleted files
+    /// in `scope`.
+    fn start_scan(&mut self, path: String, label: String, scope: Scope, ctx: &egui::Context) {
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Mutex::new(ScanProgress {
@@ -158,7 +163,11 @@ impl DataRecovererApp {
         let thread_path = path.clone();
 
         std::thread::spawn(move || {
-            let result = ntfs::scan_drive(&thread_path, &thread_cancel, &thread_found, |p| {
+            // The scanner reports every deleted file into `raw`; the collector
+            // moves those in `scope` into the results on each progress report.
+            let raw = Arc::new(Mutex::new(Vec::new()));
+            let mut collector = scope::Collector::new(scope, thread_path.clone());
+            let result = ntfs::scan_drive(&thread_path, &thread_cancel, &raw, |p| {
                 // The scan reports progress frequently; block here while paused
                 // so the worker stops touching the disk until resumed.
                 while thread_paused.load(Ordering::Relaxed)
@@ -166,9 +175,15 @@ impl DataRecovererApp {
                 {
                     std::thread::sleep(std::time::Duration::from_millis(60));
                 }
+                collector.drain(&mut raw.lock().unwrap(), &mut thread_found.lock().unwrap());
                 *thread_progress.lock().unwrap() = p;
                 thread_ctx.request_repaint();
             });
+            {
+                let mut found = thread_found.lock().unwrap();
+                collector.drain(&mut raw.lock().unwrap(), &mut found);
+                collector.finish(&mut found);
+            }
             let _ = tx.send(result);
             thread_ctx.request_repaint();
         });
@@ -194,6 +209,41 @@ impl DataRecovererApp {
             finished: false,
         });
         self.screen = Screen::Browse;
+    }
+
+    /// Scans volume `i` when its file system is supported.
+    fn scan_volume(&mut self, i: usize, label: String, scope: Scope, ctx: &egui::Context) {
+        let vol = &self.volumes[i];
+        let fs = vol.filesystem.to_uppercase();
+        if !matches!(fs.as_str(), "" | "NTFS" | "FAT" | "FAT32" | "EXFAT") {
+            self.message = Some((
+                format!(
+                    "{} gebruikt {}. Ondersteund worden NTFS, FAT (12/16/32) en exFAT.",
+                    vol.display_name(),
+                    vol.filesystem
+                ),
+                false,
+            ));
+            return;
+        }
+        let path = vol.scan_path.clone();
+        self.start_scan(path, label, scope, ctx);
+    }
+
+    /// Scans the drive of `folder`, showing only the deleted files that were
+    /// in that folder or below.
+    fn scan_folder(&mut self, folder: &Path, label: String, ctx: &egui::Context) {
+        let text = folder.to_string_lossy();
+        let volume = text
+            .get(..2)
+            .and_then(|letter| self.volumes.iter().position(|v| v.letter.eq_ignore_ascii_case(letter)));
+        let Some(i) = volume else {
+            self.message = Some((format!("{} staat niet op een schijf van deze computer.", folder.display()), false));
+            return;
+        };
+        let on_volume = text[2..].trim_end_matches('\\');
+        let scope = if on_volume.is_empty() { Scope::Drive } else { Scope::Folder(on_volume.to_string()) };
+        self.scan_volume(i, label, scope, ctx);
     }
 
     /// Picks up the scan thread's result once it finishes.
@@ -527,29 +577,20 @@ impl DataRecovererApp {
                 if ui::quick_tile(ui, tile_w, icon::DISC, "Schijfimage", "Een .img- of .dd-bestand scannen", true) {
                     quick = Some(QuickAction::DiskImage);
                 }
-                ui::quick_tile(ui, tile_w, icon::DESKTOP, "Desktop", "Verwijderd van het bureaublad", false);
-                ui::quick_tile(ui, tile_w, icon::FOLDER_OPEN, "Map selecteren", "Eén map doorzoeken", false);
-                ui::quick_tile(ui, tile_w, icon::TRASH, "Prullenbak", "Geleegde prullenbak", false);
+                if ui::quick_tile(ui, tile_w, icon::DESKTOP, "Desktop", "Verwijderd van het bureaublad", true) {
+                    quick = Some(QuickAction::Desktop);
+                }
+                if ui::quick_tile(ui, tile_w, icon::FOLDER_OPEN, "Map selecteren", "Eén map doorzoeken", true) {
+                    quick = Some(QuickAction::Folder);
+                }
+                if ui::quick_tile(ui, tile_w, icon::TRASH, "Prullenbak", "Geleegde prullenbak", true) {
+                    quick = Some(QuickAction::RecycleBin);
+                }
             });
 
             if let Some(i) = to_scan {
-                let vol = &self.volumes[i];
-                let fs = vol.filesystem.to_uppercase();
-                let supported = matches!(fs.as_str(), "" | "NTFS" | "FAT" | "FAT32" | "EXFAT");
-                if !supported {
-                    self.message = Some((
-                        format!(
-                            "{} gebruikt {}. Ondersteund worden NTFS, FAT (12/16/32) en exFAT.",
-                            vol.display_name(),
-                            vol.filesystem
-                        ),
-                        false,
-                    ));
-                } else {
-                    let path = vol.scan_path.clone();
-                    let label = vol.display_name();
-                    self.start_scan(path, label, ctx);
-                }
+                let label = self.volumes[i].display_name();
+                self.scan_volume(i, label, Scope::Drive, ctx);
             } else if let Some(action) = quick {
                 self.handle_quick_action(action, ctx);
             }
@@ -569,7 +610,32 @@ impl DataRecovererApp {
                         .and_then(|n| n.to_str())
                         .unwrap_or("Schijfimage")
                         .to_string();
-                    self.start_scan(path.to_string_lossy().into_owned(), label, ctx);
+                    self.start_scan(path.to_string_lossy().into_owned(), label, Scope::Drive, ctx);
+                }
+            }
+            QuickAction::Desktop => match disk::desktop_folder() {
+                Some(dir) => self.scan_folder(&dir, "Bureaublad".to_string(), ctx),
+                None => self.message = Some(("De bureaubladmap is niet gevonden.".to_string(), false)),
+            },
+            QuickAction::Folder => {
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    let label = dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned());
+                    self.scan_folder(&dir, label, ctx);
+                }
+            }
+            QuickAction::RecycleBin => {
+                // Each drive has its own Recycle Bin; this tile looks at the
+                // one of the Windows drive. Scanning a whole drive also shows
+                // files from its emptied bin, under their own names.
+                let letter = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+                match self.volumes.iter().position(|v| v.letter.eq_ignore_ascii_case(&letter)) {
+                    Some(i) => self.scan_volume(i, format!("Prullenbak ({letter})"), Scope::RecycleBin, ctx),
+                    None => {
+                        self.message = Some((
+                            format!("Schijf {letter} niet gevonden. Start Data Recoverer als administrator."),
+                            false,
+                        ))
+                    }
                 }
             }
         }
@@ -887,6 +953,9 @@ impl DataRecovererApp {
 #[derive(Clone, Copy)]
 enum QuickAction {
     DiskImage,
+    Desktop,
+    Folder,
+    RecycleBin,
 }
 
 impl eframe::App for DataRecovererApp {
@@ -1038,7 +1107,7 @@ fn main() -> eframe::Result<()> {
                     .and_then(|n| n.to_str())
                     .unwrap_or(path)
                     .to_string();
-                app.start_scan(path.clone(), label, &cc.egui_ctx);
+                app.start_scan(path.clone(), label, Scope::Drive, &cc.egui_ctx);
             }
             Ok(Box::new(app))
         }),
