@@ -272,3 +272,19 @@ fn smart_table(ui: &mut egui::Ui, d: &DiskHealth) {
         Smart::NeedsAdmin | Smart::Unavailable => {}
     }
 }
+
+/// Selectable cards for the physical disks. Returns the disk clicked.
+pub(crate) fn disk_chips(ui: &mut egui::Ui, disks: &[DiskHealth], selected: Option<u32>) -> Option<u32> {
+    let mut picked = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
+        for d in disks {
+            let glyph = if d.bus == Bus::Usb { icon::USB } else { icon::HARD_DRIVE };
+            let sub = format!("{} · {} · Schijf {}", kind_label(d), disk::format_size(d.size), d.index);
+            if crate::cleanup::location_chip(ui, glyph, &d.model, &sub, selected == Some(d.index)) {
+                picked = Some(d.index);
+            }
+        }
+    });
+    picked
+}

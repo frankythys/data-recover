@@ -90,15 +90,21 @@ struct Attr {
 
 /// Scans every NTFS partition on the drive by walking its Master File
 /// Table, pushing each deleted file it finds into `found` as soon as it is
-/// located so the UI can display results live.
-pub fn scan_drive(
+/// located so the UI can display results live. With `start` set only the
+/// file system that begins at that byte offset is scanned (a partition found
+/// by the lost-partition search) instead of what the partition table lists.
+pub fn scan_drive_at(
     path: &str,
+    start: Option<u64>,
     cancel: &Arc<AtomicBool>,
     found: &Arc<Mutex<Vec<RecoveredFile>>>,
     mut on_progress: impl FnMut(ScanProgress),
 ) -> io::Result<()> {
     let mut file = File::open(path)?;
-    let partitions = read_partitions(&mut file)?;
+    let partitions = match start {
+        Some(start) => vec![Partition { start }],
+        None => read_partitions(&mut file)?,
+    };
 
     'partitions: for part in &partitions {
         if cancel.load(Ordering::Relaxed) {

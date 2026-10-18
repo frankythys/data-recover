@@ -11,13 +11,24 @@ mod duplicates_view;
 mod fat;
 mod health;
 mod health_view;
+mod imaging;
+mod imaging_view;
 mod junk;
 mod largefiles;
 mod ntfs;
+mod partitions;
+mod partitions_view;
 mod preview;
 mod scope;
+mod speed;
+mod speed_view;
+mod surface;
+mod surface_view;
 mod theme;
+mod treemap;
 mod ui;
+mod wipe;
+mod wipe_view;
 
 use disk::{DriveKind, VolumeInfo};
 use egui_phosphor::regular as icon;
@@ -37,6 +48,11 @@ enum Screen {
     Browse,
     Cleanup,
     Health,
+    Surface,
+    Speed,
+    Partitions,
+    Imaging,
+    Wipe,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -124,6 +140,11 @@ struct DataRecovererApp {
     /// "Grote bestanden" screen; keeps its scan when switching screens.
     cleanup: cleanup::CleanupScreen,
     health: health_view::HealthView,
+    imaging: imaging_view::ImagingView,
+    partitions: partitions_view::PartitionsView,
+    surface: surface_view::SurfaceView,
+    speed: speed_view::SpeedView,
+    wipe: wipe_view::WipeView,
 }
 
 impl DataRecovererApp {
@@ -143,6 +164,11 @@ impl DataRecovererApp {
             message: None,
             cleanup: cleanup::CleanupScreen::new(),
             health: health_view::HealthView::new(),
+            imaging: imaging_view::ImagingView::new(),
+            partitions: partitions_view::PartitionsView::new(),
+            surface: surface_view::SurfaceView::new(),
+            speed: speed_view::SpeedView::new(),
+            wipe: wipe_view::WipeView::new(),
         }
     }
 }
@@ -151,6 +177,12 @@ impl DataRecovererApp {
     /// Starts a scan of `path` (a volume or image) showing the deleted files
     /// in `scope`.
     fn start_scan(&mut self, path: String, label: String, scope: Scope, ctx: &egui::Context) {
+        self.start_scan_at(path, None, label, scope, ctx);
+    }
+
+    /// [`Self::start_scan`] of only the file system that starts at byte
+    /// `start` of `path`, when given.
+    fn start_scan_at(&mut self, path: String, start: Option<u64>, label: String, scope: Scope, ctx: &egui::Context) {
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Mutex::new(ScanProgress {
@@ -172,7 +204,7 @@ impl DataRecovererApp {
             // moves those in `scope` into the results on each progress report.
             let raw = Arc::new(Mutex::new(Vec::new()));
             let mut collector = scope::Collector::new(scope, thread_path.clone());
-            let result = ntfs::scan_drive(&thread_path, &thread_cancel, &raw, |p| {
+            let result = ntfs::scan_drive_at(&thread_path, start, &thread_cancel, &raw, |p| {
                 // The scan reports progress frequently; block here while paused
                 // so the worker stops touching the disk until resumed.
                 while thread_paused.load(Ordering::Relaxed)
@@ -330,6 +362,26 @@ impl DataRecovererApp {
         let health = matches!(self.screen, Screen::Health);
         if ui::nav_item(ui, icon::HEARTBEAT, "Schijfgezondheid", health).clicked() {
             self.screen = Screen::Health;
+        }
+        let surface = matches!(self.screen, Screen::Surface);
+        if ui::nav_item(ui, icon::PULSE, "Oppervlaktetest", surface).clicked() {
+            self.screen = Screen::Surface;
+        }
+        let speed = matches!(self.screen, Screen::Speed);
+        if ui::nav_item(ui, icon::SPEEDOMETER, "Snelheidstest", speed).clicked() {
+            self.screen = Screen::Speed;
+        }
+        let partitions = matches!(self.screen, Screen::Partitions);
+        if ui::nav_item(ui, icon::SQUARE_SPLIT_HORIZONTAL, "Partities", partitions).clicked() {
+            self.screen = Screen::Partitions;
+        }
+        let imaging = matches!(self.screen, Screen::Imaging);
+        if ui::nav_item(ui, icon::DISC, "Schijfimage maken", imaging).clicked() {
+            self.screen = Screen::Imaging;
+        }
+        let wipe = matches!(self.screen, Screen::Wipe);
+        if ui::nav_item(ui, icon::ERASER, "Veilig wissen", wipe).clicked() {
+            self.screen = Screen::Wipe;
         }
     }
 
@@ -984,7 +1036,7 @@ impl eframe::App for DataRecovererApp {
                     .stroke(egui::Stroke::new(1.0_f32, theme::CARD_BORDER)),
             )
             .show(ctx, |ui| match self.screen {
-                Screen::Home | Screen::Cleanup | Screen::Health => self.draw_sidebar_home(ui),
+                Screen::Home | Screen::Cleanup | Screen::Health | Screen::Surface | Screen::Speed | Screen::Partitions | Screen::Imaging | Screen::Wipe => self.draw_sidebar_home(ui),
                 Screen::Browse => self.draw_browse_tree(ui),
             });
 
@@ -1022,6 +1074,19 @@ impl eframe::App for DataRecovererApp {
                 Screen::Browse => self.draw_browse(ui),
                 Screen::Cleanup => self.cleanup.draw(ui, &self.volumes),
                 Screen::Health => self.health.draw(ui, &self.volumes),
+                Screen::Surface => self.surface.draw(ui),
+                Screen::Speed => self.speed.draw(ui, &self.volumes),
+                Screen::Wipe => self.wipe.draw(ui, &self.volumes),
+                Screen::Partitions => {
+                    if let Some(req) = self.partitions.draw(ui, &self.volumes) {
+                        self.start_scan_at(req.path, Some(req.start), req.label, Scope::Drive, ctx);
+                    }
+                }
+                Screen::Imaging => {
+                    if let Some((path, label)) = self.imaging.draw(ui, &self.volumes) {
+                        self.start_scan(path, label, Scope::Drive, ctx);
+                    }
+                }
             });
     }
 }

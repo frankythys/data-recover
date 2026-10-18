@@ -2,7 +2,8 @@
 //! - "Systeem opschonen": caches and temporary files, cleaned in one go.
 //! - "Programma's": big program data (see `apps_view`).
 //! - "Grote bestanden": the user's own largest files.
-//! - "Grote mappen": the user's own folders by size, to browse into.
+//! - "Grote mappen": the user's own folders by size, to browse into, as a
+//!   list or as a treemap (see `treemap`).
 //! - "Duplicaten": files with the same contents (see `duplicates_view`).
 //! Files and folders can be opened in Explorer or moved to the Recycle Bin.
 //! Windows and program files and folders are never listed.
@@ -13,7 +14,7 @@ use crate::disk::{self, VolumeInfo};
 use crate::duplicates_view::DuplicatesView;
 use crate::junk::{self, CleanReport, Kind, Measure};
 use crate::largefiles::{self, CleanupProgress, CleanupResult, LargeFile};
-use crate::{ntfs, theme, ui};
+use crate::{ntfs, theme, treemap, ui};
 use egui::{Rect, Sense, pos2, vec2};
 use egui_phosphor::regular as icon;
 use std::io;
@@ -142,6 +143,8 @@ pub struct CleanupScreen {
     /// The user's files directly inside `folder`, largest first.
     folder_files: Vec<LargeFile>,
     folder_sel: Option<FolderSel>,
+    /// Show "Grote mappen" as a treemap instead of a list.
+    folder_map: bool,
     confirm: Option<LargeFile>,
     confirm_dir: Option<usize>,
     /// (text, is_success) shown on the screen.
@@ -164,6 +167,7 @@ impl CleanupScreen {
             folder: None,
             folder_files: Vec::new(),
             folder_sel: None,
+            folder_map: false,
             confirm: None,
             confirm_dir: None,
             message: None,
@@ -742,6 +746,15 @@ impl CleanupScreen {
                     go_to = Some(Some(i));
                 }
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let view = |glyph: &str| egui::RichText::new(glyph).font(theme::icon(16.0));
+                if ui.selectable_label(self.folder_map, view(icon::SQUARES_FOUR)).on_hover_text("Als kaart").clicked() {
+                    self.folder_map = true;
+                }
+                if ui.selectable_label(!self.folder_map, view(icon::LIST_BULLETS)).on_hover_text("Als lijst").clicked() {
+                    self.folder_map = false;
+                }
+            });
         });
         let summary = match self.folder {
             None => format!("{} mappen van minimaal {min}, grootste eerst", ui::fmt_thousands(dirs.len() as u64)),
@@ -758,6 +771,32 @@ impl CleanupScreen {
         let rows = dirs.len() + files.len();
         if rows == 0 {
             ui::empty_card(ui, icon::CHECK_CIRCLE, "Geen eigen mappen of bestanden boven deze grootte.");
+        } else if self.folder_map {
+            let mut items: Vec<treemap::Item> = dirs
+                .iter()
+                .map(|&d| treemap::Item {
+                    label: result.dirs[d].name.to_string_lossy().into_owned(),
+                    size: result.dirs[d].size,
+                    color: theme::ACCENT,
+                    folder: true,
+                })
+                .collect();
+            items.extend(files.iter().map(|&i| {
+                let name = file_name(&self.folder_files[i].path);
+                let color = ui::category_style(ntfs::category_for_name(&name)).1;
+                treemap::Item { label: name, size: self.folder_files[i].size, color, folder: false }
+            }));
+            if let Some(hit) = treemap::draw(ui, &items) {
+                match dirs.get(hit.index) {
+                    Some(&d) => go_to = Some(Some(d)),
+                    None => {
+                        self.folder_sel = Some(FolderSel::File(files[hit.index - dirs.len()]));
+                        if hit.double {
+                            self.open_selected();
+                        }
+                    }
+                }
+            }
         } else {
             let mut clicked = None;
             let mut opened = None;

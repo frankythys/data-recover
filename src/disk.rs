@@ -21,6 +21,8 @@ pub struct VolumeInfo {
     pub filesystem: String,
     /// Physical disk number backing this volume, for the "Schijf0" badge.
     pub disk_index: Option<u32>,
+    /// Byte offset of this partition on that disk.
+    pub disk_offset: Option<u64>,
     pub total_bytes: u64,
     pub used_bytes: u64,
     pub kind: DriveKind,
@@ -109,7 +111,8 @@ pub fn list_volumes() -> Vec<VolumeInfo> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    fn physical_disk_index(volume_path: &str) -> Option<u32> {
+    /// (physical disk number, byte offset on that disk) of a volume.
+    fn physical_location(volume_path: &str) -> Option<(u32, u64)> {
         let wpath = wide(volume_path);
         let handle: HANDLE = unsafe {
             CreateFileW(
@@ -150,7 +153,8 @@ pub fn list_volumes() -> Vec<VolumeInfo> {
             let _ = CloseHandle(handle);
         }
         if ok.is_ok() && extents.number_of_disk_extents >= 1 {
-            Some(extents.extents[0].disk_number)
+            let first = &extents.extents[0];
+            Some((first.disk_number, first.starting_offset.max(0) as u64))
         } else {
             None
         }
@@ -203,8 +207,10 @@ pub fn list_volumes() -> Vec<VolumeInfo> {
         };
 
         let scan_path = format!(r"\\.\{letter_char}:");
+        let location = physical_location(&scan_path);
         volumes.push(VolumeInfo {
-            disk_index: physical_disk_index(&scan_path),
+            disk_index: location.map(|l| l.0),
+            disk_offset: location.map(|l| l.1),
             scan_path,
             letter: format!("{letter_char}:"),
             label,
@@ -227,6 +233,53 @@ fn wide_to_string(buf: &[u16]) -> String {
 #[cfg(not(windows))]
 pub fn list_volumes() -> Vec<VolumeInfo> {
     Vec::new()
+}
+
+/// Size in bytes of a disk, partition or ordinary file. Windows reports a
+/// length of 0 for disks and partitions, so those are asked for theirs.
+#[cfg(windows)]
+pub fn device_len(file: &File) -> io::Result<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::IO::DeviceIoControl;
+    const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405C;
+
+    let len = file.metadata()?.len();
+    if len > 0 {
+        return Ok(len);
+    }
+    let mut out = 0i64;
+    unsafe {
+        DeviceIoControl(
+            HANDLE(file.as_raw_handle()),
+            IOCTL_DISK_GET_LENGTH_INFO,
+            None,
+            0,
+            Some(&mut out as *mut i64 as *mut std::ffi::c_void),
+            std::mem::size_of::<i64>() as u32,
+            None,
+            None,
+        )
+    }
+    .map_err(io::Error::from)?;
+    Ok(out.max(0) as u64)
+}
+
+#[cfg(not(windows))]
+pub fn device_len(file: &File) -> io::Result<u64> {
+    Ok(file.metadata()?.len())
+}
+
+/// A folder on drive `letter` (`D:`) where a temporary file may be made.
+/// The root of the Windows drive is only writable for administrators, so
+/// there the temp folder (on that same drive) is used.
+pub fn writable_folder(letter: &str) -> std::path::PathBuf {
+    let temp = std::env::temp_dir();
+    if temp.to_string_lossy().get(..2).is_some_and(|l| l.eq_ignore_ascii_case(letter)) {
+        temp
+    } else {
+        std::path::PathBuf::from(format!("{letter}\\"))
+    }
 }
 
 /// The user's Desktop folder, also when it was moved (for example to OneDrive).
