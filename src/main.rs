@@ -125,6 +125,15 @@ struct ScanHandle {
     finished: bool,
 }
 
+/// The app icon (window, taskbar and the logo in the sidebar).
+pub const ICON_PNG: &[u8] = include_bytes!("../assets/disktools.png");
+
+fn window_icon() -> Option<egui::IconData> {
+    let img = image::load_from_memory_with_format(ICON_PNG, image::ImageFormat::Png).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(egui::IconData { rgba: img.into_raw(), width, height })
+}
+
 /// `--screenshot <scherm> <bestand>`: saves an image of the window once the
 /// screen has loaded, then closes (to check the layout without clicking).
 struct Screenshot {
@@ -312,7 +321,7 @@ impl DataRecovererApp {
             scan.finished_after = Some(scan.started_at.elapsed().as_secs());
             if let Err(e) = result {
                 let msg = if e.kind() == io::ErrorKind::PermissionDenied {
-                    "Toegang geweigerd. Start Data Recoverer als administrator \
+                    "Toegang geweigerd. Start DiskTools als administrator \
                      (rechtermuisknop → Als administrator uitvoeren)."
                         .to_string()
                 } else {
@@ -711,7 +720,7 @@ impl DataRecovererApp {
                     Some(i) => self.scan_volume(i, format!("Prullenbak ({letter})"), Scope::RecycleBin, ctx),
                     None => {
                         self.message = Some((
-                            format!("Schijf {letter} niet gevonden. Start Data Recoverer als administrator."),
+                            format!("Schijf {letter} niet gevonden. Start DiskTools als administrator."),
                             false,
                         ))
                     }
@@ -1213,21 +1222,22 @@ impl FolderTree {
 }
 
 fn main() -> eframe::Result<()> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Data Recoverer")
+    let mut viewport = egui::ViewportBuilder::default()
+            .with_title("DiskTools")
             .with_inner_size([1180.0, 760.0])
-            .with_min_inner_size([920.0, 600.0]),
-        ..Default::default()
-    };
+            .with_min_inner_size([920.0, 600.0]);
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
 
     eframe::run_native(
-        "Data Recoverer",
+        "DiskTools",
         options,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
             let mut app = DataRecovererApp::new(&cc.egui_ctx);
-            // `data-recoverer --scan <pad>` opent meteen een scan van een schijf
+            // `disktools --scan <pad>` opent meteen een scan van een schijf
             // of image, zonder bestandsdialoog (handig om te testen).
             let args: Vec<String> = std::env::args().collect();
             if let Some(path) = args
@@ -1242,7 +1252,7 @@ fn main() -> eframe::Result<()> {
                     .to_string();
                 app.start_scan(path.clone(), label, Scope::Drive, &cc.egui_ctx);
             }
-            // `data-recoverer --screenshot partities scherm.png` opent een scherm,
+            // `disktools --screenshot partities scherm.png` opent een scherm,
             // slaat er een afbeelding van op en sluit (om de opmaak te controleren).
             if let Some(i) = args.iter().position(|a| a == "--screenshot") {
                 if let (Some(screen), Some(path)) = (args.get(i + 1), args.get(i + 2)) {

@@ -70,7 +70,7 @@ impl HealthView {
                 ui,
                 icon::SHIELD_WARNING,
                 theme::ACCENT,
-                "Start Data Recoverer als administrator om alle gezondheidsgegevens te lezen.",
+                "Start DiskTools als administrator om alle gezondheidsgegevens te lezen.",
             );
             ui.add_space(10.0);
         }

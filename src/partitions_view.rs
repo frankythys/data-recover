@@ -121,7 +121,7 @@ impl PartitionsView {
         let Some(job) = &self.search else { return };
         if let Ok(result) = job.rx.try_recv() {
             let result = result.map_err(|e| match e.kind() {
-                io::ErrorKind::PermissionDenied => "Start Data Recoverer als administrator om de schijf te doorzoeken.".to_string(),
+                io::ErrorKind::PermissionDenied => "Start DiskTools als administrator om de schijf te doorzoeken.".to_string(),
                 io::ErrorKind::Interrupted => "Zoeken gestopt.".to_string(),
                 _ => format!("Zoeken mislukt: {e}"),
             });

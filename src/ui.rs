@@ -249,16 +249,38 @@ pub fn checkbox_label(ui: &mut Ui, checked: bool, text: &str) -> bool {
 pub fn logo(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 76.0), Sense::hover());
     let tile = Rect::from_min_size(rect.min + vec2(18.0, 20.0), vec2(36.0, 36.0));
-    let p = ui.painter();
-    p.rect_filled(tile, 10.0, theme::ACCENT);
-    p.text(tile.center(), egui::Align2::CENTER_CENTER, icon::LIFEBUOY, theme::icon(21.0), Color32::WHITE);
+    match logo_texture(ui.ctx()) {
+        Some(texture) => {
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+            ui.painter().image(texture.id(), tile, uv, Color32::WHITE);
+        }
+        None => {
+            ui.painter().rect_filled(tile, 10.0, theme::ACCENT);
+            ui.painter().text(tile.center(), egui::Align2::CENTER_CENTER, icon::HARD_DRIVE, theme::icon(21.0), Color32::WHITE);
+        }
+    }
     let x = tile.right() + 12.0;
     let max_w = rect.right() - x - 12.0;
-    let (title, _) = elided(ui, "Data Recoverer", theme::font_semibold(16.0), theme::TEXT_MAIN, max_w);
-    let (sub, _) = elided(ui, "Bestandsherstel", theme::font(12.0), theme::TEXT_DIM, max_w);
+    let (title, _) = elided(ui, "DiskTools", theme::font_semibold(16.0), theme::TEXT_MAIN, max_w);
+    let (sub, _) = elided(ui, "Herstel en schijfbeheer", theme::font(12.0), theme::TEXT_DIM, max_w);
     let p = ui.painter();
     p.galley(pos2(x, tile.top() - 1.0), title, theme::TEXT_MAIN);
     p.galley(pos2(x, tile.top() + 20.0), sub, theme::TEXT_DIM);
+}
+
+/// The app icon as a texture, decoded once.
+fn logo_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let id = egui::Id::new("app_logo");
+    if let Some(texture) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return Some(texture);
+    }
+    let img = image::load_from_memory_with_format(crate::ICON_PNG, image::ImageFormat::Png).ok()?.into_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    // Mipmaps keep the 256 px icon sharp when drawn small.
+    let options = egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR };
+    let texture = ctx.load_texture("app_logo", egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), options);
+    ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
+    Some(texture)
 }
 
 /// Small uppercase caption above a group of sidebar items.

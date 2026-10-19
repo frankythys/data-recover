@@ -1,5 +1,5 @@
 [package]
-name = "data-recoverer"
+name = "disktools"
 version = "0.1.0"
 edition = "2024"
 

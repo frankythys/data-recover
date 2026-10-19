@@ -165,7 +165,7 @@ impl ImageJob {
             self.finished_after = Some(self.started_at.elapsed());
             self.result = Some(result.map_err(|e| {
                 if e.kind() == io::ErrorKind::PermissionDenied {
-                    "Toegang geweigerd. Start Data Recoverer als administrator.".to_string()
+                    "Toegang geweigerd. Start DiskTools als administrator.".to_string()
                 } else {
                     e.to_string()
                 }

@@ -1182,7 +1182,7 @@ fn junk_row(ui: &mut egui::Ui, kind: Kind, measure: Option<Measure>, checked: bo
     ui.painter().galley(pos2(x, rect.top() + 15.0), t, theme::TEXT_MAIN);
     ui.painter().galley(pos2(x, rect.top() + 37.0), d, theme::TEXT_DIM);
     let tip = if measure.is_some_and(|m| !m.accessible) {
-        "Start Data Recoverer als administrator om dit op te ruimen."
+        "Start DiskTools als administrator om dit op te ruimen."
     } else {
         kind.description()
     };

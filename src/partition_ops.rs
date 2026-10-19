@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 
 /// Exit code the script uses when it does not run as administrator.
 const EXIT_NOT_ADMIN: i32 = 3;
-const NEEDS_ADMIN: &str = "Hiervoor zijn administratorrechten nodig. Start Data Recoverer als administrator.";
+const NEEDS_ADMIN: &str = "Hiervoor zijn administratorrechten nodig. Start DiskTools als administrator.";
 /// Last output lines of a tool kept for an error message.
 const TAIL_LINES: usize = 6;
 const MAX_NTFS_LABEL: usize = 32;

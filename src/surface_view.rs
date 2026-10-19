@@ -70,7 +70,7 @@ impl SurfaceView {
             job.finished_after = Some(job.started_at.elapsed());
             if let Err(e) = result {
                 job.error = Some(if e.kind() == io::ErrorKind::PermissionDenied {
-                    "Toegang geweigerd. Start Data Recoverer als administrator.".to_string()
+                    "Toegang geweigerd. Start DiskTools als administrator.".to_string()
                 } else {
                     format!("Test mislukt: {e}")
                 });
