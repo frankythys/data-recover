@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 
-const SIDE_W: f32 = 250.0;
+const SIDE_W: f32 = 300.0;
 const MAP_DEFAULT_H: f32 = 220.0;
 
 /// Something for the rest of the app to do.
@@ -497,8 +497,8 @@ fn operations(row: Option<&VolRow>, disk: Option<&DiskView>, busy: bool, guard: 
         item(icon::HASH, "Stationsletter wijzigen", false, unless_system(Action::Op(Request::Letter(target.clone())))),
         item(icon::TAG, "Label wijzigen", false, with_volume(Action::Op(Request::Label(target.clone(), volume.map(|v| v.label.clone()).unwrap_or_default())))),
         item(icon::FLAG, "Actief maken", false, active),
-        item(icon::STETHOSCOPE, "Controleren", false, with_volume(Action::Op(Request::Check(target.clone())))),
-        item(icon::LIGHTNING, "Defragmenteren / optimaliseren", false, with_volume(Action::Op(Request::Optimize(target.clone())))),
+        item(icon::STETHOSCOPE, "Controleren", false, with_volume(Action::Op(Request::Check(target.clone(), letter.unwrap_or('C'))))),
+        item(icon::LIGHTNING, "Defragmenteren / optimaliseren", false, with_volume(Action::Op(Request::Optimize(target.clone(), letter.unwrap_or('C'))))),
         item(if letter.is_some() { icon::EYE_SLASH } else { icon::EYE }, if letter.is_some() { "Verbergen" } else { "Zichtbaar maken" }, false, hide),
         item(icon::TRASH, "Verwijderen", true, erasing(Action::Op(Request::Delete(target.clone())))),
         item(icon::ERASER, "Formatteren", true, erasing(Action::Op(Request::Format(target.clone())))),

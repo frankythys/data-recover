@@ -3,12 +3,19 @@
 //! management (the PowerShell Storage cmdlets, as Disk Management uses), so
 //! the app never writes partition tables or file systems itself. Values are
 //! passed through environment variables, never pasted into the script, so a
-//! label cannot inject commands. Everything needs administrator rights.
+//! label cannot inject commands. Checking and optimising run `chkdsk` and
+//! `defrag` directly, because those report their progress. Everything needs
+//! administrator rights.
 
-use std::process::Command;
+use std::collections::VecDeque;
+use std::io::{self, Read};
+use std::process::{Command, Stdio};
 
 /// Exit code the script uses when it does not run as administrator.
 const EXIT_NOT_ADMIN: i32 = 3;
+const NEEDS_ADMIN: &str = "Hiervoor zijn administratorrechten nodig. Start Data Recoverer als administrator.";
+/// Last output lines of a tool kept for an error message.
+const TAIL_LINES: usize = 6;
 const MAX_NTFS_LABEL: usize = 32;
 const MAX_FAT_LABEL: usize = 11;
 
@@ -52,8 +59,10 @@ pub enum PartOp {
     Hide { target: Target, letter: char },
     /// Give a hidden partition a drive letter again.
     Show { target: Target },
-    Check { target: Target },
-    Optimize { target: Target },
+    /// `chkdsk X: /scan`: an online check that changes nothing.
+    Check { target: Target, letter: char },
+    /// `defrag X: /O`: defragments a hard disk, trims an SSD.
+    Optimize { target: Target, letter: char },
     Format { target: Target, fs: Fs, label: String },
     /// Full format: every sector of the partition is overwritten with zeros.
     Wipe { target: Target, fs: Fs },
@@ -79,8 +88,8 @@ impl PartOp {
             PartOp::Hide { target, .. } => format!("{} verbergen (letter weghalen)", target.name),
             PartOp::Show { target } => format!("{} zichtbaar maken", target.name),
             PartOp::Wipe { target, .. } => format!("{} wissen: alles overschrijven met nullen", target.name),
-            PartOp::Check { target } => format!("{} controleren op fouten", target.name),
-            PartOp::Optimize { target } => format!("{} optimaliseren", target.name),
+            PartOp::Check { target, .. } => format!("{} controleren op fouten", target.name),
+            PartOp::Optimize { target, .. } => format!("{} optimaliseren", target.name),
             PartOp::Format { target, fs, .. } => format!("{} formatteren als {}", target.name, fs.label()),
             PartOp::Delete { target } => format!("{} verwijderen", target.name),
         }
@@ -99,8 +108,8 @@ impl PartOp {
             | PartOp::SetActive { target }
             | PartOp::Hide { target, .. }
             | PartOp::Show { target }
-            | PartOp::Check { target }
-            | PartOp::Optimize { target }
+            | PartOp::Check { target, .. }
+            | PartOp::Optimize { target, .. }
             | PartOp::Format { target, .. }
             | PartOp::Wipe { target, .. }
             | PartOp::Delete { target } => Some(target),
@@ -108,8 +117,9 @@ impl PartOp {
         }
     }
 
-    /// The script body and the values it reads from `$env:DR_*`.
-    fn script(&self) -> (&'static str, Vec<(&'static str, String)>) {
+    /// The script body and the values it reads from `$env:DR_*`; `None` for
+    /// the operations that run a tool instead.
+    fn script(&self) -> Option<(&'static str, Vec<(&'static str, String)>)> {
         let mut env = Vec::new();
         if let Some(t) = self.target() {
             env.push(("DR_DISK", t.disk.to_string()));
@@ -151,8 +161,7 @@ impl PartOp {
                 "Get-Partition -DiskNumber $env:DR_DISK -PartitionNumber $env:DR_PART | \
                  Format-Volume -FileSystem $env:DR_FS -Full -Confirm:$false -Force | Out-Null"
             }
-            PartOp::Check { .. } => "Get-Partition -DiskNumber $env:DR_DISK -PartitionNumber $env:DR_PART | Get-Volume | Repair-Volume -Scan",
-            PartOp::Optimize { .. } => "Get-Partition -DiskNumber $env:DR_DISK -PartitionNumber $env:DR_PART | Get-Volume | Optimize-Volume",
+            PartOp::Check { .. } | PartOp::Optimize { .. } => return None,
             PartOp::Format { fs, label, .. } => {
                 env.push(("DR_FS", fs.label().to_string()));
                 env.push(("DR_LABEL", label.clone()));
@@ -161,29 +170,129 @@ impl PartOp {
             }
             PartOp::Delete { .. } => "Remove-Partition -DiskNumber $env:DR_DISK -PartitionNumber $env:DR_PART -Confirm:$false",
         };
-        (body, env)
+        Some((body, env))
     }
 
-    /// Carries out the operation. Returns what Windows reported, in Dutch
-    /// where it is a known result.
-    pub fn run(&self) -> Result<String, String> {
-        let (body, env) = self.script();
-        let out = run_script(body, &env)?;
-        Ok(match self {
-            PartOp::Check { .. } => check_result(&out),
-            _ => "Gelukt".to_string(),
-        })
+    /// Carries out the operation, reporting a percentage when the tool gives
+    /// one. Returns what Windows reported, in Dutch where it is known.
+    pub fn run(&self, progress: &mut dyn FnMut(u8)) -> Result<String, String> {
+        match self {
+            PartOp::Check { letter, .. } => check(*letter, progress),
+            PartOp::Optimize { letter, .. } => optimize(*letter, progress),
+            _ => {
+                let (body, env) = self.script().ok_or("onbekende bewerking")?;
+                run_script(body, &env).map(|_| "Gelukt".to_string())
+            }
+        }
     }
 }
 
-fn check_result(out: &str) -> String {
-    match out.trim() {
-        "NoErrorsFound" => "Geen fouten gevonden".to_string(),
-        "ScanNeeded" | "SpotFixNeeded" | "FullRepairNeeded" => {
-            "Fouten gevonden. Herstel ze met Schijfbeheer of chkdsk /f (vraagt soms een herstart).".to_string()
-        }
-        other => other.to_string(),
+fn check(letter: char, progress: &mut dyn FnMut(u8)) -> Result<String, String> {
+    require_admin()?;
+    let drive = format!("{letter}:");
+    let (code, tail) = run_tool("chkdsk.exe", &[&drive, "/scan"], progress).map_err(|e| format!("chkdsk kon niet starten: {e}"))?;
+    check_result(code, letter, &tail)
+}
+
+/// What `chkdsk /scan` means by its exit code.
+fn check_result(code: i32, letter: char, tail: &str) -> Result<String, String> {
+    match code {
+        0 => Ok("Geen fouten gevonden".to_string()),
+        1 | 2 => Ok("Kleine problemen gevonden en meteen opgelost".to_string()),
+        3 => Err(format!("Fouten gevonden die nu niet hersteld kunnen worden. Herstel ze met chkdsk {letter}: /f (vraagt soms een herstart).")),
+        _ => Err(if tail.is_empty() { format!("chkdsk stopte met code {code}") } else { tail.to_string() }),
     }
+}
+
+fn optimize(letter: char, progress: &mut dyn FnMut(u8)) -> Result<String, String> {
+    require_admin()?;
+    let drive = format!("{letter}:");
+    match run_tool("defrag.exe", &[&drive, "/O", "/U"], progress) {
+        Ok((0, _)) => Ok("Gelukt".to_string()),
+        Ok((code, tail)) => Err(if tail.is_empty() { format!("defrag stopte met code {code}") } else { tail }),
+        Err(e) => Err(format!("defrag kon niet starten: {e}")),
+    }
+}
+
+#[cfg(windows)]
+fn require_admin() -> Result<(), String> {
+    use windows::Win32::UI::Shell::IsUserAnAdmin;
+    if unsafe { IsUserAnAdmin() }.as_bool() { Ok(()) } else { Err(NEEDS_ADMIN.to_string()) }
+}
+
+#[cfg(not(windows))]
+fn require_admin() -> Result<(), String> {
+    Err(NEEDS_ADMIN.to_string())
+}
+
+/// The last percentage in a line of tool output, e.g. 31 in
+/// "Voortgang: 5 van 9 voltooid; Fase: 100%; Totaal: 31%; ETA: 0:00:05".
+fn percent_in(line: &str) -> Option<u8> {
+    let bytes = line.as_bytes();
+    let mut last = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b != b'%' {
+            continue;
+        }
+        let mut end = i;
+        while end > 0 && bytes[end - 1] == b' ' {
+            end -= 1;
+        }
+        let start = bytes[..end].iter().rposition(|c| !c.is_ascii_digit()).map_or(0, |p| p + 1);
+        if let Some(n) = line.get(start..end).and_then(|d| d.parse::<u8>().ok()).filter(|&n| n <= 100) {
+            last = Some(n);
+        }
+    }
+    last
+}
+
+/// Runs a console tool, passing every percentage it prints to `progress`
+/// as it appears. Returns its exit code and its last lines of output.
+fn run_tool(exe: &str, args: &[&str], progress: &mut dyn FnMut(u8)) -> io::Result<(i32, String)> {
+    let mut cmd = Command::new(exe);
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn()?;
+    let mut out = child.stdout.take().ok_or_else(|| io::Error::other("geen uitvoer"))?;
+    let mut tail: VecDeque<String> = VecDeque::new();
+    let mut line = Vec::new();
+    let mut buf = [0u8; 4096];
+    let mut finish_line = |line: &mut Vec<u8>, tail: &mut VecDeque<String>| {
+        let text = String::from_utf8_lossy(line).trim().to_string();
+        line.clear();
+        if text.is_empty() {
+            return;
+        }
+        if let Some(p) = percent_in(&text) {
+            progress(p);
+        }
+        if tail.len() == TAIL_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(text);
+    };
+    loop {
+        let n = out.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        // Progress lines are rewritten with a carriage return.
+        for &b in &buf[..n] {
+            if b == b'\r' || b == b'\n' {
+                finish_line(&mut line, &mut tail);
+            } else {
+                line.push(b);
+            }
+        }
+    }
+    finish_line(&mut line, &mut tail);
+    let status = child.wait()?;
+    Ok((status.code().unwrap_or(-1), Vec::from(tail).join("\n")))
 }
 
 /// What may not be changed on this computer.
@@ -282,7 +391,7 @@ fn run_script(body: &str, env: &[(&str, String)]) -> Result<String, String> {
     let output = powershell(&script, env).map_err(|e| format!("PowerShell kon niet starten: {e}"))?;
     match output.status.code() {
         Some(0) => Ok(String::from_utf8_lossy(&output.stdout).trim().to_string()),
-        Some(EXIT_NOT_ADMIN) => Err("Hiervoor zijn administratorrechten nodig. Start Data Recoverer als administrator.".to_string()),
+        Some(EXIT_NOT_ADMIN) => Err(NEEDS_ADMIN.to_string()),
         _ => {
             let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
             Err(if err.is_empty() { "Windows meldde een onbekende fout.".to_string() } else { err })
@@ -345,7 +454,7 @@ mod tests {
 
     #[test]
     fn hide_passes_the_letter_through_the_environment() {
-        let (body, env) = PartOp::Hide { target: target(1, 2), letter: 'E' }.script();
+        let (body, env) = PartOp::Hide { target: target(1, 2), letter: 'E' }.script().unwrap();
 
         assert!(body.contains("$env:DR_LETTER") && !body.contains("E:"));
         assert!(env.contains(&("DR_LETTER", "E".to_string())));
@@ -381,7 +490,7 @@ mod tests {
     fn values_go_through_the_environment_not_the_script() {
         let op = PartOp::SetLabel { target: target(2, 5), label: "'; Remove-Item C:\\ -Recurse; '".into() };
 
-        let (body, env) = op.script();
+        let (body, env) = op.script().unwrap();
 
         assert!(!body.contains("Remove-Item"));
         assert!(env.contains(&("DR_LABEL", "'; Remove-Item C:\\ -Recurse; '".to_string())));
@@ -400,7 +509,34 @@ mod tests {
     fn parses_supported_sizes_and_check_results() {
         assert_eq!(parse_sizes("1048576 2097152\r\n"), Some((1_048_576, 2_097_152)));
         assert_eq!(parse_sizes("Fout"), None);
-        assert_eq!(check_result("NoErrorsFound\r\n"), "Geen fouten gevonden");
+        assert_eq!(check_result(0, 'D', ""), Ok("Geen fouten gevonden".to_string()));
+        assert!(check_result(3, 'D', "").unwrap_err().contains("chkdsk D: /f"));
+        assert_eq!(check_result(7, 'D', "Toegang geweigerd"), Err("Toegang geweigerd".to_string()));
+    }
+
+    #[test]
+    fn finds_the_total_percentage_in_tool_output() {
+        assert_eq!(percent_in("Progress: 5 of 9 done; Stage: 100%; Total: 31%; ETA:   0:00:05 .."), Some(31));
+        assert_eq!(percent_in("Voortgang: 5 van 9 voltooid; Fase: 100 %; Totaal: 7 %"), Some(7));
+        assert_eq!(percent_in("Optimization: 45% complete..."), Some(45));
+        assert_eq!(percent_in("Stage 1: Examining basic file system structure ..."), None);
+        assert_eq!(percent_in("250% klopt niet"), None);
+    }
+
+    /// Runs a real process: progress printed with carriage returns arrives
+    /// as it is printed, and the exit code and last lines come back.
+    #[cfg(windows)]
+    #[test]
+    fn tool_progress_is_read_while_it_runs() {
+        let script = "[Console]::Out.Write(\"Stage: 50%; Total: 10%`r\"); [Console]::Out.Write(\"Stage: 90%; Total: 60%`r\"); \
+                      Write-Output 'Klaar'; exit 4";
+        let mut seen = Vec::new();
+
+        let (code, tail) = run_tool("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", script], &mut |p| seen.push(p)).unwrap();
+
+        assert_eq!(seen, [10, 60]);
+        assert_eq!(code, 4);
+        assert!(tail.ends_with("Klaar"), "{tail}");
     }
 
     /// Runs PowerShell for real: without administrator rights the script

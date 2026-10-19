@@ -11,6 +11,7 @@ use egui::vec2;
 use egui_phosphor::regular as icon;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const MIB: u64 = 1 << 20;
 const GIB: f64 = (1u64 << 30) as f64;
@@ -39,8 +40,8 @@ pub enum Request {
     SetActive(Target),
     Hide(Target, char),
     Show(Target),
-    Check(Target),
-    Optimize(Target),
+    Check(Target, char),
+    Optimize(Target, char),
     Format(Target),
     Wipe(Target, Fs),
     Delete(Target),
@@ -61,10 +62,19 @@ enum Dialog {
 
 type Outcome = Vec<(String, Result<String, String>)>;
 
+/// The operation that is running now.
+#[derive(Clone)]
+struct Running {
+    done: usize,
+    current: String,
+    /// Percentage, when the tool reports one.
+    percent: Option<u8>,
+    started: Instant,
+}
+
 struct ApplyJob {
     total: usize,
-    /// (operations done, the one running now)
-    progress: Arc<Mutex<(usize, String)>>,
+    progress: Arc<Mutex<Running>>,
     rx: Receiver<Outcome>,
 }
 
@@ -165,8 +175,8 @@ impl OpsPanel {
             Request::SetActive(target) => return self.push(PartOp::SetActive { target }, base),
             Request::Hide(target, letter) => return self.push(PartOp::Hide { target, letter }, base),
             Request::Show(target) => return self.push(PartOp::Show { target }, base),
-            Request::Check(target) => return self.push(PartOp::Check { target }, base),
-            Request::Optimize(target) => return self.push(PartOp::Optimize { target }, base),
+            Request::Check(target, letter) => return self.push(PartOp::Check { target, letter }, base),
+            Request::Optimize(target, letter) => return self.push(PartOp::Optimize { target, letter }, base),
         });
     }
 
@@ -182,17 +192,18 @@ impl OpsPanel {
         }
         let mut remove = None;
         for (i, op) in self.queue.iter().enumerate() {
-            ui.horizontal(|ui| {
+            ui.horizontal_top(|ui| {
                 let color = if op.is_destructive() { theme::DANGER } else { theme::TEXT_MAIN };
                 let text = egui::RichText::new(format!("{}. {}", i + 1, op.describe())).size(12.5).color(color);
-                ui.add(egui::Label::new(text).wrap());
-            });
-            ui.horizontal(|ui| {
-                ui.add_space(14.0);
-                if ui.small_button("Weghalen").clicked() {
+                let width = ui.available_width() - 34.0;
+                ui.allocate_ui_with_layout(vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.add(egui::Label::new(text).wrap());
+                });
+                if ui::icon_button(ui, icon::X, "Uit de wachtrij halen").clicked() {
                     remove = Some(i);
                 }
             });
+            ui.add_space(4.0);
         }
         if let Some(i) = remove {
             self.queue.remove(i);
@@ -317,18 +328,35 @@ impl OpsPanel {
 
     fn draw_running(&self, ctx: &egui::Context) {
         let Some(job) = &self.apply else { return };
-        let (done, current) = job.progress.lock().unwrap().clone();
+        let r = job.progress.lock().unwrap().clone();
         dim_background(ctx);
         dialog("partition_running", ctx, |ui| {
-            dialog_title(ui, icon::GEAR, theme::ACCENT, "Bewerkingen uitvoeren…", &format!("{} van {}", done + 1, job.total));
+            dialog_title(ui, icon::GEAR, theme::ACCENT, "Bewerkingen uitvoeren…", &format!("Bewerking {} van {}", r.done + 1, job.total));
+            ui.label(egui::RichText::new(&r.current).font(theme::font_medium(14.0)));
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT));
-                ui.label(current);
+                let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width() - 52.0, 10.0), egui::Sense::hover());
+                match r.percent {
+                    Some(p) => ui::progress_bar(ui, bar, f32::from(p) / 100.0, theme::ACCENT),
+                    None => moving_bar(ui, bar),
+                }
+                let pct = r.percent.map_or_else(|| "…".to_string(), |p| format!("{p}%"));
+                ui.label(egui::RichText::new(pct).font(theme::font_semibold(14.0)));
             });
-            let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), egui::Sense::hover());
-            ui::progress_bar(ui, bar, done as f32 / job.total.max(1) as f32, theme::ACCENT);
-            ui.label(egui::RichText::new("Sluit de app niet tot alles klaar is.").color(theme::TEXT_DIM));
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new(format!("Bezig sinds {}", ui::fmt_duration(r.started.elapsed().as_secs()))).color(theme::TEXT_DIM));
+            if r.percent.is_none() {
+                ui.label(
+                    egui::RichText::new("Windows meldt hierbij (nog) geen percentage. Bij grote schijven kan dit enkele minuten duren.")
+                        .size(12.5)
+                        .color(theme::TEXT_DIM),
+                );
+            }
+            ui.add_space(4.0);
+            notice(ui, icon::INFO, theme::ACCENT, "Sluit de app niet tot alles klaar is.");
         });
+        // Keep the clock and the moving bar going.
+        ctx.request_repaint_after(Duration::from_millis(50));
     }
 
     fn draw_outcome(&mut self, ctx: &egui::Context) {
@@ -369,7 +397,7 @@ impl OpsPanel {
     fn start_apply(&mut self, ctx: &egui::Context) {
         let ops = std::mem::take(&mut self.queue);
         let total = ops.len();
-        let progress = Arc::new(Mutex::new((0, String::new())));
+        let progress = Arc::new(Mutex::new(Running { done: 0, current: String::new(), percent: None, started: Instant::now() }));
         let (tx, rx) = channel();
         let (thread_progress, ctx) = (progress.clone(), ctx.clone());
         std::thread::spawn(move || {
@@ -380,9 +408,12 @@ impl OpsPanel {
                     outcome.push((op.describe(), Err("Niet uitgevoerd omdat een eerdere bewerking mislukte.".to_string())));
                     continue;
                 }
-                *thread_progress.lock().unwrap() = (i, op.describe());
+                *thread_progress.lock().unwrap() = Running { done: i, current: op.describe(), percent: None, started: Instant::now() };
                 ctx.request_repaint();
-                let result = op.run();
+                let result = op.run(&mut |p| {
+                    thread_progress.lock().unwrap().percent = Some(p);
+                    ctx.request_repaint();
+                });
                 failed = result.is_err();
                 outcome.push((op.describe(), result));
             }
@@ -391,6 +422,16 @@ impl OpsPanel {
         });
         self.apply = Some(ApplyJob { total, progress, rx });
     }
+}
+
+/// A bar with a block sliding through it, for work without a percentage.
+fn moving_bar(ui: &egui::Ui, bar: egui::Rect) {
+    ui.painter().rect_filled(bar, bar.height() / 2.0, theme::TRACK_BG);
+    let block = bar.width() * 0.3;
+    let t = (ui.input(|i| i.time) * 0.7).fract() as f32;
+    let x = bar.left() - block + t * (bar.width() + block);
+    let rect = egui::Rect::from_min_size(egui::pos2(x, bar.top()), vec2(block, bar.height()));
+    ui.painter().with_clip_rect(bar).rect_filled(rect, bar.height() / 2.0, theme::ACCENT);
 }
 
 /// Draws the fields of a dialog. Returns the operation they describe, once
