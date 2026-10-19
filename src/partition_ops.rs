@@ -1,5 +1,5 @@
-//! Changing partitions: resize, create, drive letter, label, check,
-//! optimise, format and delete. The work is done by Windows' own storage
+//! Changing partitions: resize, create, drive letter, label, mark active,
+//! hide or show, check, optimise, format, wipe and delete. The work is done by Windows' own storage
 //! management (the PowerShell Storage cmdlets, as Disk Management uses), so
 //! the app never writes partition tables or file systems itself. Values are
 //! passed through environment variables, never pasted into the script, so a
@@ -46,9 +46,17 @@ pub enum PartOp {
     Create { disk: u32, offset: u64, size: u64, fs: Fs, label: String, letter: Option<char> },
     SetLetter { target: Target, letter: char },
     SetLabel { target: Target, label: String },
+    /// Mark an MBR partition as the one the BIOS starts from.
+    SetActive { target: Target },
+    /// Remove the drive letter, so the partition no longer shows in Explorer.
+    Hide { target: Target, letter: char },
+    /// Give a hidden partition a drive letter again.
+    Show { target: Target },
     Check { target: Target },
     Optimize { target: Target },
     Format { target: Target, fs: Fs, label: String },
+    /// Full format: every sector of the partition is overwritten with zeros.
+    Wipe { target: Target, fs: Fs },
     Delete { target: Target },
 }
 
@@ -67,6 +75,10 @@ impl PartOp {
             }
             PartOp::SetLetter { target, letter } => format!("{}: letter wordt {letter}:", target.name),
             PartOp::SetLabel { target, label } => format!("{}: label wordt \"{label}\"", target.name),
+            PartOp::SetActive { target } => format!("{} actief maken", target.name),
+            PartOp::Hide { target, .. } => format!("{} verbergen (letter weghalen)", target.name),
+            PartOp::Show { target } => format!("{} zichtbaar maken", target.name),
+            PartOp::Wipe { target, .. } => format!("{} wissen: alles overschrijven met nullen", target.name),
             PartOp::Check { target } => format!("{} controleren op fouten", target.name),
             PartOp::Optimize { target } => format!("{} optimaliseren", target.name),
             PartOp::Format { target, fs, .. } => format!("{} formatteren als {}", target.name, fs.label()),
@@ -76,7 +88,7 @@ impl PartOp {
 
     /// Whether the operation erases data.
     pub fn is_destructive(&self) -> bool {
-        matches!(self, PartOp::Format { .. } | PartOp::Delete { .. })
+        matches!(self, PartOp::Format { .. } | PartOp::Wipe { .. } | PartOp::Delete { .. })
     }
 
     fn target(&self) -> Option<&Target> {
@@ -84,9 +96,13 @@ impl PartOp {
             PartOp::Resize { target, .. }
             | PartOp::SetLetter { target, .. }
             | PartOp::SetLabel { target, .. }
+            | PartOp::SetActive { target }
+            | PartOp::Hide { target, .. }
+            | PartOp::Show { target }
             | PartOp::Check { target }
             | PartOp::Optimize { target }
             | PartOp::Format { target, .. }
+            | PartOp::Wipe { target, .. }
             | PartOp::Delete { target } => Some(target),
             PartOp::Create { .. } => None,
         }
@@ -123,6 +139,17 @@ impl PartOp {
             PartOp::SetLabel { label, .. } => {
                 env.push(("DR_LABEL", label.clone()));
                 "Get-Partition -DiskNumber $env:DR_DISK -PartitionNumber $env:DR_PART | Get-Volume | Set-Volume -NewFileSystemLabel $env:DR_LABEL"
+            }
+            PartOp::SetActive { .. } => "Set-Partition -DiskNumber $env:DR_DISK -PartitionNumber $env:DR_PART -IsActive $true",
+            PartOp::Hide { letter, .. } => {
+                env.push(("DR_LETTER", letter.to_string()));
+                "Remove-PartitionAccessPath -DiskNumber $env:DR_DISK -PartitionNumber $env:DR_PART -AccessPath \"$($env:DR_LETTER):\\\""
+            }
+            PartOp::Show { .. } => "Add-PartitionAccessPath -DiskNumber $env:DR_DISK -PartitionNumber $env:DR_PART -AssignDriveLetter",
+            PartOp::Wipe { fs, .. } => {
+                env.push(("DR_FS", fs.label().to_string()));
+                "Get-Partition -DiskNumber $env:DR_DISK -PartitionNumber $env:DR_PART | \
+                 Format-Volume -FileSystem $env:DR_FS -Full -Confirm:$false -Force | Out-Null"
             }
             PartOp::Check { .. } => "Get-Partition -DiskNumber $env:DR_DISK -PartitionNumber $env:DR_PART | Get-Volume | Repair-Volume -Scan",
             PartOp::Optimize { .. } => "Get-Partition -DiskNumber $env:DR_DISK -PartitionNumber $env:DR_PART | Get-Volume | Optimize-Volume",
@@ -169,6 +196,8 @@ pub struct Guard {
     pub system_parts: Vec<(u32, u32)>,
     /// Drive letters in use.
     pub used_letters: Vec<char>,
+    /// Letter of the Windows drive, which may never be hidden.
+    pub windows_letter: Option<char>,
 }
 
 impl Guard {
@@ -179,7 +208,15 @@ impl Guard {
                 return Some("Dit is een systeempartitie die Windows nodig heeft om op te starten.".to_string());
             }
             if op.is_destructive() && self.windows_disk.is_none_or(|d| d == t.disk) {
-                return Some("Verwijderen en formatteren mag niet op de schijf waar Windows op staat.".to_string());
+                return Some("Verwijderen, formatteren en wissen mag niet op de schijf waar Windows op staat.".to_string());
+            }
+            if matches!(op, PartOp::SetActive { .. }) && self.windows_disk.is_none_or(|d| d == t.disk) {
+                return Some("Een andere partitie actief maken op de Windows-schijf kan het opstarten breken.".to_string());
+            }
+        }
+        if let PartOp::Hide { letter, .. } = op {
+            if self.windows_letter.is_none_or(|w| w == *letter) {
+                return Some("De Windows-schijf kan niet verborgen worden.".to_string());
             }
         }
         let letter = match op {
@@ -277,7 +314,7 @@ mod tests {
     }
 
     fn guard() -> Guard {
-        Guard { windows_disk: Some(0), system_parts: vec![(0, 1), (0, 4)], used_letters: vec!['C', 'D'] }
+        Guard { windows_disk: Some(0), system_parts: vec![(0, 1), (0, 4)], used_letters: vec!['C', 'D'], windows_letter: Some('C') }
     }
 
     #[test]
@@ -292,6 +329,26 @@ mod tests {
         assert_eq!(g.refuse(&PartOp::Resize { target: target(0, 3), from: 10, to: 20 }), None);
         let unknown = Guard { windows_disk: None, ..guard() };
         assert!(unknown.refuse(&delete(1)).is_some(), "zonder bekende Windows-schijf nergens verwijderen");
+    }
+
+    #[test]
+    fn windows_disk_cannot_be_wiped_hidden_or_have_its_active_partition_changed() {
+        let g = guard();
+
+        assert!(g.refuse(&PartOp::Wipe { target: target(0, 3), fs: Fs::Ntfs }).is_some());
+        assert!(g.refuse(&PartOp::SetActive { target: target(0, 3) }).is_some());
+        assert!(g.refuse(&PartOp::Hide { target: target(0, 3), letter: 'C' }).is_some());
+        assert_eq!(g.refuse(&PartOp::Hide { target: target(1, 1), letter: 'E' }), None);
+        assert_eq!(g.refuse(&PartOp::SetActive { target: target(1, 1) }), None);
+        assert!(PartOp::Wipe { target: target(1, 1), fs: Fs::Ntfs }.is_destructive());
+    }
+
+    #[test]
+    fn hide_passes_the_letter_through_the_environment() {
+        let (body, env) = PartOp::Hide { target: target(1, 2), letter: 'E' }.script();
+
+        assert!(body.contains("$env:DR_LETTER") && !body.contains("E:"));
+        assert!(env.contains(&("DR_LETTER", "E".to_string())));
     }
 
     #[test]

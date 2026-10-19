@@ -83,7 +83,7 @@ pub fn read_at(file: &mut File, offset: u64, len: usize) -> io::Result<Vec<u8>> 
 #[cfg(windows)]
 pub fn list_volumes() -> Vec<VolumeInfo> {
     use std::ffi::c_void;
-    use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
         GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, OPEN_EXISTING,
@@ -117,7 +117,9 @@ pub fn list_volumes() -> Vec<VolumeInfo> {
         let handle: HANDLE = unsafe {
             CreateFileW(
                 PCWSTR(wpath.as_ptr()),
-                GENERIC_READ.0,
+                // No read access needed (or allowed without administrator
+                // rights) to ask where a volume lives.
+                0,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 None,
                 OPEN_EXISTING,

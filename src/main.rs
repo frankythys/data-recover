@@ -17,6 +17,7 @@ mod junk;
 mod largefiles;
 mod ntfs;
 mod partition_ops;
+mod partition_map;
 mod partition_ops_view;
 mod partitions;
 mod partitions_view;
@@ -124,6 +125,17 @@ struct ScanHandle {
     finished: bool,
 }
 
+/// `--screenshot <scherm> <bestand>`: saves an image of the window once the
+/// screen has loaded, then closes (to check the layout without clicking).
+struct Screenshot {
+    path: std::path::PathBuf,
+    started: Instant,
+    requested: bool,
+}
+
+/// Time the screen gets to load its data before the screenshot.
+const SCREENSHOT_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
 struct DataRecovererApp {
     volumes: Vec<VolumeInfo>,
     scan_source_path: Option<String>,
@@ -147,6 +159,7 @@ struct DataRecovererApp {
     surface: surface_view::SurfaceView,
     speed: speed_view::SpeedView,
     wipe: wipe_view::WipeView,
+    screenshot: Option<Screenshot>,
 }
 
 impl DataRecovererApp {
@@ -171,6 +184,7 @@ impl DataRecovererApp {
             surface: surface_view::SurfaceView::new(),
             speed: speed_view::SpeedView::new(),
             wipe: wipe_view::WipeView::new(),
+            screenshot: None,
         }
     }
 }
@@ -1015,6 +1029,31 @@ impl DataRecovererApp {
     }
 }
 
+impl DataRecovererApp {
+    fn take_screenshot(&mut self, ctx: &egui::Context) {
+        let Some(shot) = self.screenshot.as_mut() else { return };
+        let image = ctx.input(|i| {
+            i.raw.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = image {
+            let [w, h] = image.size;
+            let saved = image::RgbaImage::from_raw(w as u32, h as u32, image.as_raw().to_vec())
+                .map(|img| img.save(&shot.path));
+            if !matches!(saved, Some(Ok(()))) {
+                eprintln!("Screenshot opslaan mislukt: {}", shot.path.display());
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if !shot.requested && shot.started.elapsed() >= SCREENSHOT_DELAY {
+            shot.requested = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+        }
+        ctx.request_repaint();
+    }
+}
+
 #[derive(Clone, Copy)]
 enum QuickAction {
     DiskImage,
@@ -1026,6 +1065,7 @@ enum QuickAction {
 impl eframe::App for DataRecovererApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_scan();
+        self.take_screenshot(ctx);
 
         // Drag the right edge to resize; the width is remembered between runs.
         egui::SidePanel::left("sidebar")
@@ -1080,8 +1120,19 @@ impl eframe::App for DataRecovererApp {
                 Screen::Speed => self.speed.draw(ui, &self.volumes),
                 Screen::Wipe => self.wipe.draw(ui, &self.volumes),
                 Screen::Partitions => {
-                    if let Some(req) = self.partitions.draw(ui, &self.volumes) {
-                        self.start_scan_at(req.path, Some(req.start), req.label, Scope::Drive, ctx);
+                    match self.partitions.draw(ui, &self.volumes) {
+                        Some(partitions_view::Event::Scan { path, start, label }) => {
+                            self.start_scan_at(path, start, label, Scope::Drive, ctx);
+                        }
+                        Some(partitions_view::Event::Image(letter)) => {
+                            self.imaging.preselect_volume(&letter, &self.volumes);
+                            self.screen = Screen::Imaging;
+                        }
+                        Some(partitions_view::Event::Surface(index)) => {
+                            self.surface.preselect(index);
+                            self.screen = Screen::Surface;
+                        }
+                        None => {}
                     }
                     if self.partitions.take_changed() {
                         self.volumes = disk::list_volumes();
@@ -1190,6 +1241,28 @@ fn main() -> eframe::Result<()> {
                     .unwrap_or(path)
                     .to_string();
                 app.start_scan(path.clone(), label, Scope::Drive, &cc.egui_ctx);
+            }
+            // `data-recoverer --screenshot partities scherm.png` opent een scherm,
+            // slaat er een afbeelding van op en sluit (om de opmaak te controleren).
+            if let Some(i) = args.iter().position(|a| a == "--screenshot") {
+                if let (Some(screen), Some(path)) = (args.get(i + 1), args.get(i + 2)) {
+                    app.screen = match screen.as_str() {
+                        "opruimen" => Screen::Cleanup,
+                        "gezondheid" => Screen::Health,
+                        "oppervlakte" => Screen::Surface,
+                        "snelheid" => Screen::Speed,
+                        "partities" => Screen::Partitions,
+                        "image" => Screen::Imaging,
+                        "wissen" => Screen::Wipe,
+                        _ => Screen::Home,
+                    };
+                    app.screenshot = Some(Screenshot { path: path.into(), started: Instant::now(), requested: false });
+                    // Optional `<schijf>:<partitie>` to select on the Partities screen.
+                    let pick = args.get(i + 3).and_then(|s| s.split_once(':'));
+                    if let Some((disk, part)) = pick.and_then(|(d, p)| Some((d.parse().ok()?, p.parse().ok()?))) {
+                        app.partitions.select_partition(disk, part);
+                    }
+                }
             }
             Ok(Box::new(app))
         }),

@@ -80,6 +80,13 @@ impl ImagingView {
         self.job.as_ref().is_some_and(ImageJob::running)
     }
 
+    /// Picks drive `letter` as the source, unless an image is being made.
+    pub fn preselect_volume(&mut self, letter: &str, volumes: &[VolumeInfo]) {
+        let Some(v) = volumes.iter().find(|v| v.letter == letter).filter(|_| !self.running()) else { return };
+        self.source = Some(Source::Volume { letter: v.letter.clone(), name: v.display_name(), size: v.total_bytes, disk: v.disk_index });
+        self.dest = None;
+    }
+
     /// Draws the screen. Returns (image path, label) when the user wants to
     /// scan the finished image.
     pub fn draw(&mut self, ui: &mut egui::Ui, volumes: &[VolumeInfo]) -> Option<(String, String)> {

@@ -50,6 +50,13 @@ impl SurfaceView {
         self.job.as_ref().is_some_and(|j| j.finished_after.is_none())
     }
 
+    /// Selects disk `index`, unless a test is running.
+    pub fn preselect(&mut self, index: u32) {
+        if !self.running() {
+            self.selected = Some(index);
+        }
+    }
+
     fn poll(&mut self) {
         if let Some(disks) = self.disks_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.disks = disks;

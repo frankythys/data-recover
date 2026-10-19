@@ -88,6 +88,10 @@ pub struct PartInfo {
     pub kind: PartKind,
     /// GPT partition name (often empty).
     pub name: String,
+    /// MBR: the partition the BIOS starts from.
+    pub active: bool,
+    /// MBR: a logical partition inside the extended partition.
+    pub logical: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -376,10 +380,17 @@ mod win {
             1 => Style::Gpt,
             _ => Style::Raw,
         };
+        // Logical partitions lie inside an extended container.
+        let extended: Vec<(i64, i64)> = entries
+            .iter()
+            .filter(|e| style == Style::Mbr && MBR_EXTENDED.contains(&unsafe { e.Anonymous.Mbr.PartitionType }))
+            .map(|e| (e.StartingOffset, e.StartingOffset + e.PartitionLength))
+            .collect();
         let mut partitions: Vec<PartInfo> = entries
             .iter()
             .filter(|e| e.PartitionLength > 0)
             .filter_map(|e| {
+                let (mut active, mut logical) = (false, false);
                 let (kind, name) = match style {
                     Style::Gpt => {
                         let gpt = unsafe { &e.Anonymous.Gpt };
@@ -387,15 +398,17 @@ mod win {
                         (PartKind::from_gpt(gpt.PartitionType.to_u128()), String::from_utf16_lossy(&gpt.Name[..end]))
                     }
                     _ => {
-                        let kind = unsafe { e.Anonymous.Mbr.PartitionType };
+                        let mbr = unsafe { &e.Anonymous.Mbr };
                         // The extended container only holds the logical partitions.
-                        if kind == 0 || MBR_EXTENDED.contains(&kind) {
+                        if mbr.PartitionType == 0 || MBR_EXTENDED.contains(&mbr.PartitionType) {
                             return None;
                         }
-                        (PartKind::from_mbr(kind), String::new())
+                        active = mbr.BootIndicator.as_bool();
+                        logical = extended.iter().any(|&(s, end)| e.StartingOffset >= s && e.StartingOffset < end);
+                        (PartKind::from_mbr(mbr.PartitionType), String::new())
                     }
                 };
-                Some(PartInfo { number: e.PartitionNumber, start: e.StartingOffset as u64, size: e.PartitionLength as u64, kind, name })
+                Some(PartInfo { number: e.PartitionNumber, start: e.StartingOffset as u64, size: e.PartitionLength as u64, kind, name, active, logical })
             })
             .collect();
         partitions.sort_by_key(|p| p.start);
@@ -520,7 +533,7 @@ mod tests {
 
     #[test]
     fn gaps_skip_alignment_slack() {
-        let part = |start: u64, size: u64| PartInfo { number: 1, start, size, kind: PartKind::Data, name: String::new() };
+        let part = |start: u64, size: u64| PartInfo { number: 1, start, size, kind: PartKind::Data, name: String::new(), active: false, logical: false };
         let m = MIB as u64;
         let layout = Layout {
             index: 0,
