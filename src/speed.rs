@@ -4,6 +4,7 @@
 //! bypassed so the disk itself is measured. The test file is always removed
 //! afterwards.
 
+use crate::i18n::t;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -94,7 +95,7 @@ fn open_unbuffered(path: &Path, create: bool) -> io::Result<File> {
 }
 
 fn interrupted() -> io::Error {
-    io::Error::new(io::ErrorKind::Interrupted, "Test gestopt")
+    io::Error::new(io::ErrorKind::Interrupted, t("Test gestopt", "Test stopped"))
 }
 
 /// Runs the four measurements on a `size`-byte test file in `folder`; each
@@ -108,7 +109,7 @@ pub fn run(
 ) -> io::Result<SpeedProgress> {
     let size = size / SEQ_BLOCK as u64 * SEQ_BLOCK as u64;
     if size == 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "testbestand te klein"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, t("testbestand te klein", "test file too small")));
     }
     let guard = TestFile(folder.join(TEST_FILE_NAME));
     // Left behind by a test that was killed halfway.

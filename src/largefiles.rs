@@ -2,6 +2,8 @@
 //! files and folders, plus the two actions the cleanup screen offers on a
 //! result: show it in Explorer and move it to the Recycle Bin.
 
+use crate::i18n::t;
+use crate::tf;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::ffi::OsString;
@@ -134,7 +136,7 @@ pub fn scan(
     mut on_progress: impl FnMut(CleanupProgress),
 ) -> io::Result<CleanupResult> {
     if !root.is_dir() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, format!("Map niet gevonden: {}", root.display())));
+        return Err(io::Error::new(io::ErrorKind::NotFound, tf!("Map niet gevonden: {}", "Folder not found: {}", root.display())));
     }
     let mut result = CleanupResult::default();
     let mut largest: BinaryHeap<Reverse<LargeFile>> = BinaryHeap::new();
@@ -151,7 +153,7 @@ pub fn scan(
 
     while let Some((dir, node)) = pending.pop() {
         if cancel.load(Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "Scan gestopt"));
+            return Err(io::Error::new(io::ErrorKind::Interrupted, t("Scan gestopt", "Scan stopped")));
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             result.skipped_folders += 1;
@@ -331,7 +333,10 @@ pub fn is_container(path: &Path) -> bool {
 pub fn removal_warning(path: &Path) -> Option<&'static str> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     if matches!(ext.as_str(), "vhdx" | "vhd") {
-        Some("Dit is een virtuele schijf (bijvoorbeeld van Docker of WSL). Ruim die op via het programma zelf, anders raakt het beschadigd.")
+        Some(t(
+            "Dit is een virtuele schijf (bijvoorbeeld van Docker of WSL). Ruim die op via het programma zelf, anders raakt het beschadigd.",
+            "This is a virtual disk (for example of Docker or WSL). Clean it up via the program itself, or it gets damaged.",
+        ))
     } else {
         None
     }
@@ -353,7 +358,7 @@ pub fn show_in_explorer(path: &Path) -> io::Result<()> {
 
 #[cfg(not(windows))]
 pub fn show_in_explorer(_path: &Path) -> io::Result<()> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "Alleen op Windows"))
+    Err(io::Error::new(io::ErrorKind::Unsupported, t("Alleen op Windows", "Windows only")))
 }
 
 /// Moves a file to the Recycle Bin. Returns `Ok(false)` when the user
@@ -361,10 +366,10 @@ pub fn show_in_explorer(_path: &Path) -> io::Result<()> {
 #[cfg(windows)]
 pub fn move_to_recycle_bin(path: &Path) -> io::Result<bool> {
     if is_system_or_app(path) {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "systeem- of programmabestand, niet verwijderd"));
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, t("systeem- of programmabestand, niet verwijderd", "system or program file, not removed")));
     }
     if path.is_dir() && is_container(path) {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "deze map bevat andere mappen en kan niet in één keer weg"));
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, t("deze map bevat andere mappen en kan niet in één keer weg", "this folder holds other folders and cannot be removed in one go")));
     }
     recycle_unchecked(path)
 }
@@ -396,7 +401,8 @@ pub fn recycle_unchecked(path: &Path) -> io::Result<bool> {
     }
     if code != 0 || path.exists() {
         return Err(io::Error::other(format!(
-            "verwijderen mislukt (code 0x{code:X}); het bestand is mogelijk in gebruik of beveiligd"
+            "{} (code 0x{code:X})",
+            t("verwijderen mislukt; het bestand is mogelijk in gebruik of beveiligd", "removing failed; the file may be in use or protected")
         )));
     }
     Ok(true)
@@ -404,12 +410,12 @@ pub fn recycle_unchecked(path: &Path) -> io::Result<bool> {
 
 #[cfg(not(windows))]
 pub fn move_to_recycle_bin(_path: &Path) -> io::Result<bool> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "Alleen op Windows"))
+    Err(io::Error::new(io::ErrorKind::Unsupported, t("Alleen op Windows", "Windows only")))
 }
 
 #[cfg(not(windows))]
 pub fn recycle_unchecked(_path: &Path) -> io::Result<bool> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "Alleen op Windows"))
+    Err(io::Error::new(io::ErrorKind::Unsupported, t("Alleen op Windows", "Windows only")))
 }
 
 #[cfg(test)]

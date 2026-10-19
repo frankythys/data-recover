@@ -7,13 +7,21 @@
 //! `defrag` directly, because those report their progress. Everything needs
 //! administrator rights.
 
+use crate::i18n::t;
+use crate::tf;
 use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::process::{Command, Stdio};
 
 /// Exit code the script uses when it does not run as administrator.
 const EXIT_NOT_ADMIN: i32 = 3;
-const NEEDS_ADMIN: &str = "Hiervoor zijn administratorrechten nodig. Start DiskTools als administrator.";
+fn needs_admin() -> String {
+    t(
+        "Hiervoor zijn administratorrechten nodig. Start DiskTools als administrator.",
+        "This needs administrator rights. Start DiskTools as administrator.",
+    )
+    .to_string()
+}
 /// Last output lines of a tool kept for an error message.
 const TAIL_LINES: usize = 6;
 const MAX_NTFS_LABEL: usize = 32;
@@ -75,23 +83,26 @@ impl PartOp {
         let size = crate::disk::format_size;
         match self {
             PartOp::Resize { target, from, to } => {
-                let verb = if to > from { "vergroten" } else { "verkleinen" };
-                format!("{} {verb} van {} naar {}", target.name, size(*from), size(*to))
+                let (name, from, to, grow) = (&target.name, size(*from), size(*to), to > from);
+                match grow {
+                    true => tf!("{name} vergroten van {from} naar {to}", "Grow {name} from {from} to {to}"),
+                    false => tf!("{name} verkleinen van {from} naar {to}", "Shrink {name} from {from} to {to}"),
+                }
             }
             PartOp::Create { disk, size: s, fs, letter, .. } => {
-                let letter = letter.map(|l| format!(" als {l}:")).unwrap_or_default();
-                format!("Nieuwe {}-partitie van {} op schijf {disk}{letter}", fs.label(), size(*s))
+                let letter = letter.map(|l| tf!(" als {l}:", " as {l}:")).unwrap_or_default();
+                tf!("Nieuwe {}-partitie van {} op schijf {disk}{letter}", "New {} partition of {} on disk {disk}{letter}", fs.label(), size(*s))
             }
-            PartOp::SetLetter { target, letter } => format!("{}: letter wordt {letter}:", target.name),
-            PartOp::SetLabel { target, label } => format!("{}: label wordt \"{label}\"", target.name),
-            PartOp::SetActive { target } => format!("{} actief maken", target.name),
-            PartOp::Hide { target, .. } => format!("{} verbergen (letter weghalen)", target.name),
-            PartOp::Show { target } => format!("{} zichtbaar maken", target.name),
-            PartOp::Wipe { target, .. } => format!("{} wissen: alles overschrijven met nullen", target.name),
-            PartOp::Check { target, .. } => format!("{} controleren op fouten", target.name),
-            PartOp::Optimize { target, .. } => format!("{} optimaliseren", target.name),
-            PartOp::Format { target, fs, .. } => format!("{} formatteren als {}", target.name, fs.label()),
-            PartOp::Delete { target } => format!("{} verwijderen", target.name),
+            PartOp::SetLetter { target, letter } => tf!("{}: letter wordt {letter}:", "{}: letter becomes {letter}:", target.name),
+            PartOp::SetLabel { target, label } => tf!("{}: label wordt \"{label}\"", "{}: label becomes \"{label}\"", target.name),
+            PartOp::SetActive { target } => tf!("{} actief maken", "Mark {} active", target.name),
+            PartOp::Hide { target, .. } => tf!("{} verbergen (letter weghalen)", "Hide {} (remove letter)", target.name),
+            PartOp::Show { target } => tf!("{} zichtbaar maken", "Show {}", target.name),
+            PartOp::Wipe { target, .. } => tf!("{} wissen: alles overschrijven met nullen", "Wipe {}: overwrite everything with zeros", target.name),
+            PartOp::Check { target, .. } => tf!("{} controleren op fouten", "Check {} for errors", target.name),
+            PartOp::Optimize { target, .. } => tf!("{} optimaliseren", "Optimize {}", target.name),
+            PartOp::Format { target, fs, .. } => tf!("{} formatteren als {}", "Format {} as {}", target.name, fs.label()),
+            PartOp::Delete { target } => tf!("{} verwijderen", "Delete {}", target.name),
         }
     }
 
@@ -180,8 +191,8 @@ impl PartOp {
             PartOp::Check { letter, .. } => check(*letter, progress),
             PartOp::Optimize { letter, .. } => optimize(*letter, progress),
             _ => {
-                let (body, env) = self.script().ok_or("onbekende bewerking")?;
-                run_script(body, &env).map(|_| "Gelukt".to_string())
+                let (body, env) = self.script().ok_or(t("onbekende bewerking", "unknown operation"))?;
+                run_script(body, &env).map(|_| t("Gelukt", "Done").to_string())
             }
         }
     }
@@ -190,17 +201,20 @@ impl PartOp {
 fn check(letter: char, progress: &mut dyn FnMut(u8)) -> Result<String, String> {
     require_admin()?;
     let drive = format!("{letter}:");
-    let (code, tail) = run_tool("chkdsk.exe", &[&drive, "/scan"], progress).map_err(|e| format!("chkdsk kon niet starten: {e}"))?;
+    let (code, tail) = run_tool("chkdsk.exe", &[&drive, "/scan"], progress).map_err(|e| tf!("chkdsk kon niet starten: {e}", "chkdsk could not start: {e}"))?;
     check_result(code, letter, &tail)
 }
 
 /// What `chkdsk /scan` means by its exit code.
 fn check_result(code: i32, letter: char, tail: &str) -> Result<String, String> {
     match code {
-        0 => Ok("Geen fouten gevonden".to_string()),
-        1 | 2 => Ok("Kleine problemen gevonden en meteen opgelost".to_string()),
-        3 => Err(format!("Fouten gevonden die nu niet hersteld kunnen worden. Herstel ze met chkdsk {letter}: /f (vraagt soms een herstart).")),
-        _ => Err(if tail.is_empty() { format!("chkdsk stopte met code {code}") } else { tail.to_string() }),
+        0 => Ok(t("Geen fouten gevonden", "No errors found").to_string()),
+        1 | 2 => Ok(t("Kleine problemen gevonden en meteen opgelost", "Minor problems found and fixed right away").to_string()),
+        3 => Err(tf!(
+            "Fouten gevonden die nu niet hersteld kunnen worden. Herstel ze met chkdsk {letter}: /f (vraagt soms een herstart).",
+            "Errors found that cannot be fixed now. Fix them with chkdsk {letter}: /f (may need a restart)."
+        )),
+        _ => Err(if tail.is_empty() { tf!("chkdsk stopte met code {code}", "chkdsk stopped with code {code}") } else { tail.to_string() }),
     }
 }
 
@@ -208,21 +222,21 @@ fn optimize(letter: char, progress: &mut dyn FnMut(u8)) -> Result<String, String
     require_admin()?;
     let drive = format!("{letter}:");
     match run_tool("defrag.exe", &[&drive, "/O", "/U"], progress) {
-        Ok((0, _)) => Ok("Gelukt".to_string()),
-        Ok((code, tail)) => Err(if tail.is_empty() { format!("defrag stopte met code {code}") } else { tail }),
-        Err(e) => Err(format!("defrag kon niet starten: {e}")),
+        Ok((0, _)) => Ok(t("Gelukt", "Done").to_string()),
+        Ok((code, tail)) => Err(if tail.is_empty() { tf!("defrag stopte met code {code}", "defrag stopped with code {code}") } else { tail }),
+        Err(e) => Err(tf!("defrag kon niet starten: {e}", "defrag could not start: {e}")),
     }
 }
 
 #[cfg(windows)]
 fn require_admin() -> Result<(), String> {
     use windows::Win32::UI::Shell::IsUserAnAdmin;
-    if unsafe { IsUserAnAdmin() }.as_bool() { Ok(()) } else { Err(NEEDS_ADMIN.to_string()) }
+    if unsafe { IsUserAnAdmin() }.as_bool() { Ok(()) } else { Err(needs_admin()) }
 }
 
 #[cfg(not(windows))]
 fn require_admin() -> Result<(), String> {
-    Err(NEEDS_ADMIN.to_string())
+    Err(needs_admin())
 }
 
 /// The last percentage in a line of tool output, e.g. 31 in
@@ -258,7 +272,7 @@ fn run_tool(exe: &str, args: &[&str], progress: &mut dyn FnMut(u8)) -> io::Resul
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = cmd.spawn()?;
-    let mut out = child.stdout.take().ok_or_else(|| io::Error::other("geen uitvoer"))?;
+    let mut out = child.stdout.take().ok_or_else(|| io::Error::other(t("geen uitvoer", "no output")))?;
     let mut tail: VecDeque<String> = VecDeque::new();
     let mut line = Vec::new();
     let mut buf = [0u8; 4096];
@@ -312,20 +326,20 @@ pub struct Guard {
 impl Guard {
     /// Why `op` is not allowed, if it is not.
     pub fn refuse(&self, op: &PartOp) -> Option<String> {
-        if let Some(t) = op.target() {
-            if self.system_parts.contains(&(t.disk, t.part)) {
-                return Some("Dit is een systeempartitie die Windows nodig heeft om op te starten.".to_string());
+        if let Some(target) = op.target() {
+            if self.system_parts.contains(&(target.disk, target.part)) {
+                return Some(t("Dit is een systeempartitie die Windows nodig heeft om op te starten.", "This is a system partition Windows needs to start.").to_string());
             }
-            if op.is_destructive() && self.windows_disk.is_none_or(|d| d == t.disk) {
-                return Some("Verwijderen, formatteren en wissen mag niet op de schijf waar Windows op staat.".to_string());
+            if op.is_destructive() && self.windows_disk.is_none_or(|d| d == target.disk) {
+                return Some(t("Verwijderen, formatteren en wissen mag niet op de schijf waar Windows op staat.", "Deleting, formatting and wiping are not allowed on the disk Windows is on.").to_string());
             }
-            if matches!(op, PartOp::SetActive { .. }) && self.windows_disk.is_none_or(|d| d == t.disk) {
-                return Some("Een andere partitie actief maken op de Windows-schijf kan het opstarten breken.".to_string());
+            if matches!(op, PartOp::SetActive { .. }) && self.windows_disk.is_none_or(|d| d == target.disk) {
+                return Some(t("Een andere partitie actief maken op de Windows-schijf kan het opstarten breken.", "Marking another partition active on the Windows disk can break startup.").to_string());
             }
         }
         if let PartOp::Hide { letter, .. } = op {
             if self.windows_letter.is_none_or(|w| w == *letter) {
-                return Some("De Windows-schijf kan niet verborgen worden.".to_string());
+                return Some(t("De Windows-schijf kan niet verborgen worden.", "The Windows drive cannot be hidden.").to_string());
             }
         }
         let letter = match op {
@@ -334,10 +348,10 @@ impl Guard {
         };
         if let Some(l) = letter {
             if !('D'..='Z').contains(&l) {
-                return Some("Kies een letter van D tot en met Z.".to_string());
+                return Some(t("Kies een letter van D tot en met Z.", "Choose a letter from D to Z.").to_string());
             }
             if self.used_letters.contains(&l) {
-                return Some(format!("Letter {l}: is al in gebruik."));
+                return Some(tf!("Letter {l}: is al in gebruik.", "Letter {l}: is already in use."));
             }
         }
         let label = match op {
@@ -348,12 +362,12 @@ impl Guard {
         if let Some((label, fs)) = label {
             let max = if matches!(fs, Some(Fs::Fat32 | Fs::ExFat)) { MAX_FAT_LABEL } else { MAX_NTFS_LABEL };
             if label.chars().count() > max {
-                return Some(format!("Het label mag hoogstens {max} tekens hebben."));
+                return Some(tf!("Het label mag hoogstens {max} tekens hebben.", "The label may have at most {max} characters."));
             }
         }
         if let PartOp::Resize { from, to, .. } = op {
             if from == to {
-                return Some("Kies een andere grootte.".to_string());
+                return Some(t("Kies een andere grootte.", "Choose another size.").to_string());
             }
         }
         None
@@ -367,7 +381,7 @@ pub fn supported_size(disk: u32, part: u32) -> Result<(u64, u64), String> {
          Write-Output \"$($s.SizeMin) $($s.SizeMax)\"",
         &[("DR_DISK", disk.to_string()), ("DR_PART", part.to_string())],
     )?;
-    parse_sizes(&out).ok_or_else(|| format!("Onverwacht antwoord van Windows: {out}"))
+    parse_sizes(&out).ok_or_else(|| tf!("Onverwacht antwoord van Windows: {out}", "Unexpected answer from Windows: {out}"))
 }
 
 fn parse_sizes(out: &str) -> Option<(u64, u64)> {
@@ -388,13 +402,13 @@ fn run_script(body: &str, env: &[(&str, String)]) -> Result<String, String> {
          if (-not ([Security.Principal.WindowsPrincipal]$id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{ exit {EXIT_NOT_ADMIN} }}\n\
          try {{\n{body}\n}} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}"
     );
-    let output = powershell(&script, env).map_err(|e| format!("PowerShell kon niet starten: {e}"))?;
+    let output = powershell(&script, env).map_err(|e| tf!("PowerShell kon niet starten: {e}", "PowerShell could not start: {e}"))?;
     match output.status.code() {
         Some(0) => Ok(String::from_utf8_lossy(&output.stdout).trim().to_string()),
-        Some(EXIT_NOT_ADMIN) => Err(NEEDS_ADMIN.to_string()),
+        Some(EXIT_NOT_ADMIN) => Err(needs_admin()),
         _ => {
             let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            Err(if err.is_empty() { "Windows meldde een onbekende fout.".to_string() } else { err })
+            Err(if err.is_empty() { t("Windows meldde een onbekende fout.", "Windows reported an unknown error.").to_string() } else { err })
         }
     }
 }

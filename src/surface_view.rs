@@ -1,6 +1,8 @@
 //! "Oppervlaktetest" screen: pick a disk, read it completely and watch a
 //! map of its surface fill in.
 
+use crate::i18n::t;
+use crate::tf;
 use crate::cleanup::notice;
 use crate::health::{self, DiskHealth};
 use crate::health_view::disk_chips;
@@ -70,16 +72,16 @@ impl SurfaceView {
             job.finished_after = Some(job.started_at.elapsed());
             if let Err(e) = result {
                 job.error = Some(if e.kind() == io::ErrorKind::PermissionDenied {
-                    "Toegang geweigerd. Start DiskTools als administrator.".to_string()
+                    t("Toegang geweigerd. Start DiskTools als administrator.", "Access denied. Start DiskTools as administrator.").to_string()
                 } else {
-                    format!("Test mislukt: {e}")
+                    tf!("Test mislukt: {e}", "Test failed: {e}")
                 });
             }
         }
     }
 
     fn start(&mut self, index: u32, ctx: &egui::Context) {
-        let name = self.disks.iter().find(|d| d.index == index).map_or_else(|| format!("Schijf {index}"), |d| d.model.clone());
+        let name = self.disks.iter().find(|d| d.index == index).map_or_else(|| tf!("Schijf {index}", "Disk {index}"), |d| d.model.clone());
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Mutex::new(SurfaceProgress::default()));
@@ -113,16 +115,16 @@ impl SurfaceView {
 
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
-            ui.heading("Oppervlaktetest");
+            ui.heading(t("Oppervlaktetest", "Surface test"));
             ui.label(
-                egui::RichText::new("Leest de hele schijf één keer en laat zien welke delen goed, traag of niet te lezen zijn. Er wordt niets geschreven.")
+                egui::RichText::new(t("Leest de hele schijf één keer en laat zien welke delen goed, traag of niet te lezen zijn. Er wordt niets geschreven.", "Reads the whole disk once and shows which parts read well, slowly or not at all. Nothing is written."))
                     .color(theme::TEXT_DIM),
             );
         });
         ui.add_space(14.0);
 
         egui::ScrollArea::vertical().id_salt("surface").auto_shrink([false, false]).show(ui, |ui| {
-            ui::section_header(ui, icon::HARD_DRIVES, "Schijf", None);
+            ui::section_header(ui, icon::HARD_DRIVES, t("Schijf", "Disk"), None);
             if self.disks_rx.is_some() {
                 ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT));
             }
@@ -133,14 +135,14 @@ impl SurfaceView {
             }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                let button = ui::primary_icon_button(icon::PULSE, "Test starten").min_size(vec2(150.0, 36.0));
+                let button = ui::primary_icon_button(icon::PULSE, t("Test starten", "Start test")).min_size(vec2(150.0, 36.0));
                 if ui.add_enabled(self.selected.is_some() && !running, button).clicked() {
                     if let Some(i) = self.selected {
                         self.start(i, ui.ctx());
                     }
                 }
                 ui.label(
-                    egui::RichText::new("Duurt bij een harde schijf enkele uren; je kunt pauzeren of stoppen.")
+                    egui::RichText::new(t("Duurt bij een harde schijf enkele uren; je kunt pauzeren of stoppen.", "Takes several hours on a hard disk; you can pause or stop."))
                         .size(12.5)
                         .color(theme::TEXT_DIM),
                 );
@@ -160,16 +162,16 @@ impl SurfaceView {
 
         let title = match (running, paused, &job.error) {
             (_, _, Some(e)) => e.clone(),
-            (true, true, _) => "Gepauzeerd".to_string(),
-            (true, false, _) => format!("{} testen…", job.name),
-            (false, ..) if p.cancelled => "Test gestopt".to_string(),
-            (false, ..) => "Test klaar".to_string(),
+            (true, true, _) => t("Gepauzeerd", "Paused").to_string(),
+            (true, false, _) => tf!("{} testen…", "Testing {}…", job.name),
+            (false, ..) if p.cancelled => t("Test gestopt", "Test stopped").to_string(),
+            (false, ..) => t("Test klaar", "Test complete").to_string(),
         };
-        let mut detail = format!("{} van {} gelezen", disk::format_size(p.done), disk::format_size(p.total));
+        let mut detail = tf!("{} van {} gelezen", "{} of {} read", disk::format_size(p.done), disk::format_size(p.total));
         if speed > 0 {
             detail.push_str(&format!(" · {}/s", disk::format_size(speed)));
             if running && !paused {
-                detail.push_str(&format!(" · nog {}", ui::fmt_duration(p.total.saturating_sub(p.done) / speed.max(1))));
+                detail.push_str(&tf!(" · nog {}", " · {} left", ui::fmt_duration(p.total.saturating_sub(p.done) / speed.max(1))));
             }
         }
 
@@ -183,10 +185,10 @@ impl SurfaceView {
                 });
                 if running {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::icon_button(ui, icon::STOP, "Stoppen").clicked() {
+                        if ui::icon_button(ui, icon::STOP, t("Stoppen", "Stop")).clicked() {
                             job.cancel.store(true, Ordering::Relaxed);
                         }
-                        let (glyph, tip) = if paused { (icon::PLAY, "Hervatten") } else { (icon::PAUSE, "Pauzeren") };
+                        let (glyph, tip) = if paused { (icon::PLAY, t("Hervatten", "Resume")) } else { (icon::PAUSE, t("Pauzeren", "Pause")) };
                         if ui::icon_button(ui, glyph, tip).clicked() {
                             job.paused.store(!paused, Ordering::Relaxed);
                         }
@@ -208,28 +210,32 @@ impl SurfaceView {
                 ui,
                 icon::X_CIRCLE,
                 theme::DANGER,
-                &format!(
+                &tf!(
                     "{} kon niet gelezen worden. Bestanden op die plekken zijn beschadigd. Maak zo snel mogelijk een \
                      schijfimage en vervang de schijf.",
+                    "{} could not be read. Files in those places are damaged. Create a disk image as soon as possible \
+                     and replace the disk.",
                     disk::format_size(p.bad_bytes)
                 ),
             );
             for &at in p.bad_offsets.iter().take(LISTED_BAD) {
-                ui.label(egui::RichText::new(format!("Onleesbaar op {}", disk::format_size(at))).size(12.5).color(theme::TEXT_DIM));
+                ui.label(egui::RichText::new(tf!("Onleesbaar op {}", "Unreadable at {}", disk::format_size(at))).size(12.5).color(theme::TEXT_DIM));
             }
         } else if p.slow_chunks > 0 {
             notice(
                 ui,
                 icon::WARNING,
                 theme::WARNING,
-                &format!(
+                &tf!(
                     "{} plekken lazen erg traag. Bij een harde schijf is dat vaak het eerste teken van slijtage; houd \
                      Schijfgezondheid in de gaten en maak een back-up.",
+                    "{} places read very slowly. On a hard disk that is often the first sign of wear; keep an eye on \
+                     Disk health and make a backup.",
                     ui::fmt_thousands(p.slow_chunks)
                 ),
             );
         } else if p.finished && !p.cancelled {
-            notice(ui, icon::CHECK_CIRCLE, theme::SUCCESS, "De hele schijf is goed te lezen.");
+            notice(ui, icon::CHECK_CIRCLE, theme::SUCCESS, t("De hele schijf is goed te lezen.", "The whole disk reads fine."));
         }
     }
 }
@@ -259,7 +265,7 @@ fn draw_map(ui: &mut egui::Ui, cells: &[Cell]) {
 
 fn legend(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        for (cell, text) in [(Cell::Good, "Goed"), (Cell::Slow, "Traag"), (Cell::Bad, "Onleesbaar"), (Cell::Pending, "Nog niet gelezen")] {
+        for (cell, text) in [(Cell::Good, t("Goed", "Good")), (Cell::Slow, t("Traag", "Slow")), (Cell::Bad, t("Onleesbaar", "Unreadable")), (Cell::Pending, t("Nog niet gelezen", "Not read yet"))] {
             let (dot, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
             ui.painter().rect_filled(dot, 2.0, cell_color(cell));
             ui.label(egui::RichText::new(text).size(12.5).color(theme::TEXT_DIM));

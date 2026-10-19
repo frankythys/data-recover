@@ -2,6 +2,8 @@
 //! the same contents and lets the user remove the extra copies. The last
 //! copy of a group can never be removed.
 
+use crate::i18n::t;
+use crate::tf;
 use crate::bulk_view::{self, BulkDelete};
 use crate::cleanup::{ROW_GAP, ROW_H, file_name, location_chip, notice, result_row};
 use crate::deleter::Mode;
@@ -93,7 +95,7 @@ impl DuplicatesView {
         if self.result.is_some() {
             self.draw_groups(ui);
         } else if !self.is_scanning() {
-            ui::empty_card(ui, icon::MAGNIFYING_GLASS, "Kies een schijf of map en klik op Scannen.");
+            ui::empty_card(ui, icon::MAGNIFYING_GLASS, t("Kies een schijf of map en klik op Scannen.", "Choose a drive or folder and click Scan."));
         }
         if let Some((mode, done)) = self.bulk.draw(ui.ctx()) {
             if let Some(result) = self.result.as_mut() {
@@ -121,9 +123,9 @@ impl DuplicatesView {
                 self.result = Some(r);
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                self.message = Some(("Scan gestopt.".to_string(), false));
+                self.message = Some((t("Scan gestopt.", "Scan stopped.").to_string(), false));
             }
-            Err(e) => self.message = Some((format!("Scan mislukt: {e}"), false)),
+            Err(e) => self.message = Some((tf!("Scan mislukt: {e}", "Scan failed: {e}"), false)),
         }
     }
 
@@ -150,7 +152,7 @@ impl DuplicatesView {
 
     fn draw_location(&mut self, ui: &mut egui::Ui, volumes: &[VolumeInfo]) {
         let scanning = self.is_scanning();
-        ui::section_header(ui, icon::MAP_PIN, "Locatie", None);
+        ui::section_header(ui, icon::MAP_PIN, t("Locatie", "Location"), None);
         ui.add_enabled_ui(!scanning, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
@@ -160,13 +162,13 @@ impl DuplicatesView {
                     let selected = self.root.eq_ignore_ascii_case(&root);
                     is_drive |= selected;
                     let glyph = if vol.kind == disk::DriveKind::External { icon::USB } else { icon::HARD_DRIVE };
-                    let free = format!("{} vrij", disk::format_size(vol.total_bytes.saturating_sub(vol.used_bytes)));
+                    let free = tf!("{} vrij", "{} free", disk::format_size(vol.total_bytes.saturating_sub(vol.used_bytes)));
                     if location_chip(ui, glyph, &vol.display_name(), &free, selected) {
                         self.root = root;
                     }
                 }
                 let (title, sub) = if is_drive {
-                    ("Map kiezen…".to_string(), "Eén map doorzoeken".to_string())
+                    (t("Map kiezen…", "Choose folder…").to_string(), t("Eén map doorzoeken", "Search one folder").to_string())
                 } else {
                     (file_name(Path::new(&self.root)), self.root.clone())
                 };
@@ -184,7 +186,7 @@ impl DuplicatesView {
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!scanning, |ui| {
                     ui.label(egui::RichText::new(icon::FUNNEL).font(theme::icon(18.0)).color(theme::TEXT_DIM));
-                    ui.label(egui::RichText::new("Bestanden vanaf").color(theme::TEXT_DIM));
+                    ui.label(egui::RichText::new(t("Bestanden vanaf", "Files from")).color(theme::TEXT_DIM));
                     egui::ComboBox::from_id_salt("dups_min_size")
                         .width(90.0)
                         .selected_text(MIN_SIZES[self.min_size].0)
@@ -196,13 +198,13 @@ impl DuplicatesView {
                     ui.add_space(12.0);
                     ui.label(egui::RichText::new(icon::SHIELD_CHECK).font(theme::icon(16.0)).color(theme::SUCCESS));
                     ui.label(
-                        egui::RichText::new("Inhoud wordt vergeleken, niet de naam · Windows- en programmabestanden worden overgeslagen")
+                        egui::RichText::new(t("Inhoud wordt vergeleken, niet de naam · Windows- en programmabestanden worden overgeslagen", "Contents are compared, not names · Windows and program files are skipped"))
                             .size(12.5)
                             .color(theme::TEXT_DIM),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let button = ui::primary_icon_button(icon::MAGNIFYING_GLASS, "Scannen");
+                    let button = ui::primary_icon_button(icon::MAGNIFYING_GLASS, t("Scannen", "Scan"));
                     start = ui.add_enabled(!scanning, button.min_size(vec2(120.0, 36.0))).clicked();
                 });
             });
@@ -224,10 +226,11 @@ impl DuplicatesView {
         if let (true, Some(result)) = (finished, &self.result) {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(icon::CHECK_CIRCLE).font(theme::icon(16.0)).color(theme::SUCCESS));
-                ui.label(egui::RichText::new("Scan voltooid").font(theme::font_semibold(14.0)));
+                ui.label(egui::RichText::new(t("Scan voltooid", "Scan complete")).font(theme::font_semibold(14.0)));
                 ui.label(
-                    egui::RichText::new(format!(
+                    egui::RichText::new(tf!(
                         "{} doorzocht · {}",
+                        "{} searched · {}",
                         ui::fmt_files(result.files_scanned as usize),
                         ui::fmt_duration(elapsed)
                     ))
@@ -246,15 +249,16 @@ impl DuplicatesView {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     let title = match (finished, p.phase) {
-                        (true, _) => "Scan gestopt",
-                        (false, Phase::Listing) => "Bestanden zoeken…",
-                        (false, Phase::Comparing) => "Inhoud vergelijken…",
+                        (true, _) => t("Scan gestopt", "Scan stopped"),
+                        (false, Phase::Listing) => t("Bestanden zoeken…", "Looking for files…"),
+                        (false, Phase::Comparing) => t("Inhoud vergelijken…", "Comparing contents…"),
                     };
                     ui.label(egui::RichText::new(title).font(theme::font_semibold(16.0)));
                     let detail = match p.phase {
-                        Phase::Listing => format!("{} gevonden · {}", ui::fmt_files(p.files_scanned as usize), ui::fmt_duration(elapsed)),
-                        Phase::Comparing => format!(
+                        Phase::Listing => tf!("{} gevonden · {}", "{} found · {}", ui::fmt_files(p.files_scanned as usize), ui::fmt_duration(elapsed)),
+                        Phase::Comparing => tf!(
                             "{} van {} vergeleken · {}",
+                            "{} of {} compared · {}",
                             disk::format_size(p.bytes_compared),
                             disk::format_size(p.bytes_to_compare),
                             ui::fmt_duration(elapsed)
@@ -267,7 +271,7 @@ impl DuplicatesView {
                 });
                 if !finished {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::icon_button(ui, icon::STOP, "Scan stoppen").clicked() {
+                        if ui::icon_button(ui, icon::STOP, t("Scan stoppen", "Stop scan")).clicked() {
                             cancel.store(true, Ordering::Relaxed);
                         }
                     });
@@ -287,8 +291,9 @@ impl DuplicatesView {
         };
         let min = MIN_SIZES[self.min_size].0;
         ui.label(
-            egui::RichText::new(format!(
+            egui::RichText::new(tf!(
                 "{} groepen met dezelfde inhoud (vanaf {min}) · {} te winnen, meeste eerst",
+                "{} groups with the same contents (from {min}) · {} to gain, most first",
                 ui::fmt_thousands(result.groups.len() as u64),
                 disk::format_size(result.wasted())
             ))
@@ -302,7 +307,7 @@ impl DuplicatesView {
             ui.add_space(8.0);
         }
         if result.groups.is_empty() {
-            ui::empty_card(ui, icon::CHECK_CIRCLE, "Geen dubbele bestanden gevonden boven deze grootte.");
+            ui::empty_card(ui, icon::CHECK_CIRCLE, t("Geen dubbele bestanden gevonden boven deze grootte.", "No duplicate files found above this size."));
             return;
         }
 
@@ -310,15 +315,15 @@ impl DuplicatesView {
         let mut clear = false;
         ui.horizontal(|ui| {
             auto = ui
-                .add(ui::secondary_icon_button(icon::MAGIC_WAND, "Kopieën selecteren"))
-                .on_hover_text("Vinkt in elke groep alles aan behalve het oudste bestand")
+                .add(ui::secondary_icon_button(icon::MAGIC_WAND, t("Kopieën selecteren", "Select copies")))
+                .on_hover_text(t("Vinkt in elke groep alles aan behalve het oudste bestand", "Ticks everything in each group except the oldest file"))
                 .clicked();
-            clear = ui.add(ui::secondary_icon_button(icon::X, "Niets selecteren")).clicked();
+            clear = ui.add(ui::secondary_icon_button(icon::X, t("Niets selecteren", "Select none"))).clicked();
             let ticked = ticked_files(result, &self.checked);
             if !ticked.is_empty() {
                 let bytes: u64 = ticked.iter().map(|f| f.size).sum();
                 ui.label(
-                    egui::RichText::new(format!("{} geselecteerd · {}", ui::fmt_files(ticked.len()), disk::format_size(bytes)))
+                    egui::RichText::new(tf!("{} geselecteerd · {}", "{} selected · {}", ui::fmt_files(ticked.len()), disk::format_size(bytes)))
                         .color(theme::TEXT_DIM),
                 );
             }
@@ -385,24 +390,24 @@ impl DuplicatesView {
         let mut open = false;
         let mut remove = false;
         ui.horizontal_centered(|ui| {
-            bulk_view::selection_label(ui, &ticked, "Vink kopieën aan om ze te verwijderen");
+            bulk_view::selection_label(ui, &ticked, t("Vink kopieën aan om ze te verwijderen", "Tick copies to remove them"));
             if !keeps_one {
                 ui.add_space(12.0);
                 ui.label(egui::RichText::new(icon::WARNING_CIRCLE).font(theme::icon(16.0)).color(theme::DANGER));
-                ui.label(egui::RichText::new("Laat in elke groep minstens één bestand staan").color(theme::DANGER));
+                ui.label(egui::RichText::new(t("Laat in elke groep minstens één bestand staan", "Leave at least one file in each group")).color(theme::DANGER));
             } else if let Some((text, success)) = &self.message {
                 let color = if *success { theme::SUCCESS } else { theme::DANGER };
                 ui.add_space(12.0);
                 ui.add(egui::Label::new(egui::RichText::new(text).color(color)).truncate());
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let button = ui::danger_icon_button(icon::TRASH, "Verwijderen…").min_size(vec2(150.0, 38.0));
+                let button = ui::danger_icon_button(icon::TRASH, t("Verwijderen…", "Remove…")).min_size(vec2(150.0, 38.0));
                 remove = ui
                     .add_enabled(keeps_one && !ticked.is_empty() && !self.bulk.busy(), button)
-                    .on_disabled_hover_text("Vink kopieën aan; in elke groep moet minstens één bestand blijven")
+                    .on_disabled_hover_text(t("Vink kopieën aan; in elke groep moet minstens één bestand blijven", "Tick copies; at least one file must stay in each group"))
                     .clicked();
-                let button = ui::secondary_icon_button(icon::ARROW_SQUARE_OUT, "Open in Verkenner").min_size(vec2(170.0, 38.0));
-                open = ui.add_enabled(ticked.len() == 1, button).on_disabled_hover_text("Vink precies één bestand aan").clicked();
+                let button = ui::secondary_icon_button(icon::ARROW_SQUARE_OUT, t("Open in Verkenner", "Show in Explorer")).min_size(vec2(170.0, 38.0));
+                open = ui.add_enabled(ticked.len() == 1, button).on_disabled_hover_text(t("Vink precies één bestand aan", "Tick exactly one file")).clicked();
             });
         });
         if open {
@@ -417,7 +422,7 @@ impl DuplicatesView {
 
     fn show_in_explorer(&mut self, path: &Path) {
         if let Err(e) = largefiles::show_in_explorer(path) {
-            self.message = Some((format!("Verkenner openen mislukt: {e}"), false));
+            self.message = Some((tf!("Verkenner openen mislukt: {e}", "Could not open Explorer: {e}"), false));
         }
     }
 }
@@ -442,14 +447,14 @@ fn group_row(ui: &mut egui::Ui, group: &DupGroup, first: bool) {
     let tile = Rect::from_min_size(pos2(rect.left() + 4.0, rect.top() + 16.0), vec2(34.0, 34.0));
     ui::icon_tile(ui, tile, glyph, color, 18.0);
 
-    let win = format!("{} te winnen", disk::format_size(group.wasted()));
+    let win = tf!("{} te winnen", "{} to gain", disk::format_size(group.wasted()));
     let win = ui.painter().layout_no_wrap(win, theme::font_semibold(13.5), theme::ACCENT);
     let win_x = rect.right() - 16.0 - win.size().x;
     ui.painter().galley(pos2(win_x, tile.center().y - win.size().y / 2.0), win, theme::ACCENT);
 
     let x = tile.right() + 12.0;
     let max_w = win_x - 16.0 - x;
-    let sub = format!("{} identieke bestanden van {}", group.files.len(), disk::format_size(group.size));
+    let sub = tf!("{} identieke bestanden van {}", "{} identical files of {}", group.files.len(), disk::format_size(group.size));
     let (t, _) = ui::elided(ui, &name, theme::font_semibold(14.0), theme::TEXT_MAIN, max_w);
     let (s, _) = ui::elided(ui, &sub, theme::font(12.0), theme::TEXT_DIM, max_w);
     ui.painter().galley(pos2(x, rect.top() + 15.0), t, theme::TEXT_MAIN);
@@ -469,6 +474,6 @@ fn file_row(ui: &mut egui::Ui, f: &LargeFile, checked: bool) -> egui::Response {
             ui::fmt_month(y, m)
         })
         .filter(|s| !s.is_empty())
-        .map_or(name.clone(), |d| format!("{name} · gewijzigd {d}"));
+        .map_or(name.clone(), |d| tf!("{name} · gewijzigd {d}", "{name} · modified {d}"));
     result_row(ui, glyph, color, &folder, &date, f.size, false, Some(checked))
 }

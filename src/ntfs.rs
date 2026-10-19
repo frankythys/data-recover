@@ -733,6 +733,19 @@ pub fn category_for_name(name: &str) -> &'static str {
     }
 }
 
+/// Name of a category from [`category_for_name`] in the current language.
+pub fn category_label(category: &str) -> &'static str {
+    use crate::i18n::t;
+    match category {
+        "Fotos" => t("Foto's", "Photos"),
+        "Videos" => t("Video's", "Videos"),
+        "Audio" => "Audio",
+        "Documenten" => t("Documenten", "Documents"),
+        "Archieven" => t("Archieven", "Archives"),
+        _ => t("Overig", "Other"),
+    }
+}
+
 /// Reads up to `max` bytes of a recovered file's content into memory, used
 /// to decode image previews without writing anything to disk.
 pub fn read_file_bytes(source_path: &str, rec: &RecoveredFile, max: u64) -> io::Result<Vec<u8>> {
@@ -769,7 +782,7 @@ pub fn read_file_bytes(source_path: &str, rec: &RecoveredFile, max: u64) -> io::
 }
 
 pub fn recover_file(source_path: &str, rec: &RecoveredFile, out_dir: &Path) -> io::Result<()> {
-    let category_dir = out_dir.join(category_for_name(&rec.name));
+    let category_dir = out_dir.join(category_label(category_for_name(&rec.name)));
     fs::create_dir_all(&category_dir)?;
     let out_path = unique_path(&category_dir, &sanitize_filename(&rec.name));
     let mut out_file = File::create(out_path)?;

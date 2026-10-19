@@ -1,6 +1,8 @@
 //! "Veilig wissen" screen: wipe the free space of a drive, or shred chosen
 //! files, so deleted data can no longer be recovered.
 
+use crate::i18n::t;
+use crate::tf;
 use crate::cleanup::{dialog, dialog_title, dim_background, file_name, location_chip, notice};
 use crate::disk::{self, DriveKind, VolumeInfo};
 use crate::wipe::{self, WipeProgress};
@@ -56,9 +58,9 @@ impl WipeView {
         if let Some(job) = self.free_job.as_mut().filter(|j| j.done.is_none()) {
             if let Ok(result) = job.rx.try_recv() {
                 job.done = Some(result.map_err(|e| match e.kind() {
-                    io::ErrorKind::Interrupted => "Wissen gestopt. De vrije ruimte is maar voor een deel gewist.".to_string(),
-                    io::ErrorKind::PermissionDenied => format!("Geen toegang tot {}.", job.letter),
-                    _ => format!("Wissen mislukt: {e}"),
+                    io::ErrorKind::Interrupted => t("Wissen gestopt. De vrije ruimte is maar voor een deel gewist.", "Wipe stopped. Only part of the free space was wiped.").to_string(),
+                    io::ErrorKind::PermissionDenied => tf!("Geen toegang tot {}.", "No access to {}.", job.letter),
+                    _ => tf!("Wissen mislukt: {e}", "Wipe failed: {e}"),
                 }));
             }
         }
@@ -73,9 +75,9 @@ impl WipeView {
         self.poll();
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
-            ui.heading("Veilig wissen");
+            ui.heading(t("Veilig wissen", "Secure erase"));
             ui.label(
-                egui::RichText::new("Zorg dat verwijderde bestanden niet meer te herstellen zijn, bijvoorbeeld voordat je een schijf weggeeft.")
+                egui::RichText::new(t("Zorg dat verwijderde bestanden niet meer te herstellen zijn, bijvoorbeeld voordat je een schijf weggeeft.", "Make sure deleted files can no longer be recovered, for example before you give a drive away."))
                     .color(theme::TEXT_DIM),
             );
         });
@@ -89,17 +91,21 @@ impl WipeView {
                 ui,
                 icon::INFO,
                 theme::ACCENT,
-                "Eén keer overschrijven is genoeg voor moderne schijven. Bij SSD's kan de schijf zelf oude kopieën \
-                 bewaren die je niet kunt overschrijven; Windows wist verwijderde gegevens daar meestal al via TRIM.",
+                t(
+                    "Eén keer overschrijven is genoeg voor moderne schijven. Bij SSD's kan de schijf zelf oude kopieën \
+                     bewaren die je niet kunt overschrijven; Windows wist verwijderde gegevens daar meestal al via TRIM.",
+                    "Overwriting once is enough for modern disks. An SSD may keep old copies itself that cannot be \
+                     overwritten; there Windows usually clears deleted data already via TRIM.",
+                ),
             );
         });
         self.draw_confirm(ui.ctx(), volumes);
     }
 
     fn draw_free_space(&mut self, ui: &mut egui::Ui, volumes: &[VolumeInfo]) {
-        ui::section_header(ui, icon::BROOM, "Vrije ruimte wissen", None);
+        ui::section_header(ui, icon::BROOM, t("Vrije ruimte wissen", "Wipe free space"), None);
         ui.label(
-            egui::RichText::new("Overschrijft alle vrije ruimte met nullen. Je bestanden blijven staan; verwijderde bestanden zijn daarna weg.")
+            egui::RichText::new(t("Overschrijft alle vrije ruimte met nullen. Je bestanden blijven staan; verwijderde bestanden zijn daarna weg.", "Overwrites all free space with zeros. Your files stay; deleted files are gone afterwards."))
                 .color(theme::TEXT_DIM),
         );
         ui.add_space(8.0);
@@ -109,7 +115,7 @@ impl WipeView {
                 ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
                 for v in volumes {
                     let glyph = if v.kind == DriveKind::External { icon::USB } else { icon::HARD_DRIVE };
-                    let free = format!("{} vrij", disk::format_size(v.total_bytes.saturating_sub(v.used_bytes)));
+                    let free = tf!("{} vrij", "{} free", disk::format_size(v.total_bytes.saturating_sub(v.used_bytes)));
                     if location_chip(ui, glyph, &v.display_name(), &free, self.letter.as_deref() == Some(v.letter.as_str())) {
                         self.letter = Some(v.letter.clone());
                     }
@@ -117,7 +123,7 @@ impl WipeView {
             });
         });
         ui.add_space(10.0);
-        let button = ui::danger_icon_button(icon::BROOM, "Vrije ruimte wissen…").min_size(vec2(190.0, 36.0));
+        let button = ui::danger_icon_button(icon::BROOM, t("Vrije ruimte wissen…", "Wipe free space…")).min_size(vec2(190.0, 36.0));
         if ui.add_enabled(self.letter.is_some() && !wiping, button).clicked() {
             self.confirm = Some(Confirm::FreeSpace);
         }
@@ -132,8 +138,8 @@ impl WipeView {
         let elapsed = job.started_at.elapsed().as_secs_f64();
         let speed = if elapsed > 0.5 { (p.written as f64 / elapsed) as u64 } else { 0 };
         let (title, color) = match &job.done {
-            None => (format!("Vrije ruimte van {} wissen…", job.letter), theme::ACCENT),
-            Some(Ok(_)) => (format!("Klaar: {} overschreven", disk::format_size(p.written)), theme::SUCCESS),
+            None => (tf!("Vrije ruimte van {} wissen…", "Wiping free space of {}…", job.letter), theme::ACCENT),
+            Some(Ok(_)) => (tf!("Klaar: {} overschreven", "Done: {} overwritten", disk::format_size(p.written)), theme::SUCCESS),
             Some(Err(e)) => (e.clone(), theme::DANGER),
         };
         theme::card_frame().inner_margin(egui::Margin::symmetric(18.0, 14.0)).show(ui, |ui| {
@@ -143,17 +149,17 @@ impl WipeView {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     ui.label(egui::RichText::new(&title).font(theme::font_semibold(15.0)).color(color));
                     if job.done.is_none() {
-                        let mut detail = format!("{} van ongeveer {}", disk::format_size(p.written), disk::format_size(p.expected));
+                        let mut detail = tf!("{} van ongeveer {}", "{} of about {}", disk::format_size(p.written), disk::format_size(p.expected));
                         if speed > 0 {
                             let left = p.expected.saturating_sub(p.written) / speed.max(1);
-                            detail.push_str(&format!(" · {}/s · nog {}", disk::format_size(speed), ui::fmt_duration(left)));
+                            detail.push_str(&tf!(" · {}/s · nog {}", " · {}/s · {} left", disk::format_size(speed), ui::fmt_duration(left)));
                         }
                         ui.label(egui::RichText::new(detail).color(theme::TEXT_DIM));
                     }
                 });
                 if job.done.is_none() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::icon_button(ui, icon::STOP, "Stoppen").clicked() {
+                        if ui::icon_button(ui, icon::STOP, t("Stoppen", "Stop")).clicked() {
                             job.cancel.store(true, Ordering::Relaxed);
                         }
                     });
@@ -168,21 +174,21 @@ impl WipeView {
     }
 
     fn draw_files(&mut self, ui: &mut egui::Ui) {
-        ui::section_header(ui, icon::FILE_X, "Bestanden veilig verwijderen", None);
+        ui::section_header(ui, icon::FILE_X, t("Bestanden veilig verwijderen", "Securely delete files"), None);
         ui.label(
-            egui::RichText::new("Overschrijft de gekozen bestanden voordat ze verwijderd worden. Ze gaan niet naar de prullenbak.")
+            egui::RichText::new(t("Overschrijft de gekozen bestanden voordat ze verwijderd worden. Ze gaan niet naar de prullenbak.", "Overwrites the chosen files before they are deleted. They do not go to the Recycle Bin."))
                 .color(theme::TEXT_DIM),
         );
         ui.add_space(8.0);
         let busy = self.shred_rx.is_some();
         ui.horizontal(|ui| {
-            if ui.add_enabled(!busy, ui::secondary_icon_button(icon::FOLDER_OPEN, "Bestanden kiezen…")).clicked() {
+            if ui.add_enabled(!busy, ui::secondary_icon_button(icon::FOLDER_OPEN, t("Bestanden kiezen…", "Choose files…"))).clicked() {
                 if let Some(picked) = rfd::FileDialog::new().pick_files() {
                     self.files = picked.into_iter().filter(|p| !crate::largefiles::is_system_or_app(p)).collect();
                     self.shredded = None;
                 }
             }
-            let button = ui::danger_icon_button(icon::FILE_X, "Veilig verwijderen…");
+            let button = ui::danger_icon_button(icon::FILE_X, t("Veilig verwijderen…", "Securely delete…"));
             if ui.add_enabled(!busy && !self.files.is_empty(), button).clicked() {
                 self.confirm = Some(Confirm::Files);
             }
@@ -194,7 +200,7 @@ impl WipeView {
             ui.label(egui::RichText::new(path.display().to_string()).size(12.5).color(theme::TEXT_DIM));
         }
         if self.files.len() > LISTED {
-            ui.label(egui::RichText::new(format!("en nog {} meer", ui::fmt_files(self.files.len() - LISTED))).color(theme::TEXT_DIM));
+            ui.label(egui::RichText::new(tf!("en nog {} meer", "and {} more", ui::fmt_files(self.files.len() - LISTED))).color(theme::TEXT_DIM));
         }
         if let Some(results) = &self.shredded {
             let ok: Vec<u64> = results.iter().filter_map(|(_, r)| r.as_ref().ok().copied()).collect();
@@ -203,7 +209,7 @@ impl WipeView {
                 ui,
                 icon::CHECK_CIRCLE,
                 theme::SUCCESS,
-                &format!("{} veilig verwijderd ({}).", ui::fmt_files(ok.len()), disk::format_size(ok.iter().sum())),
+                &tf!("{} veilig verwijderd ({}).", "{} securely deleted ({}).", ui::fmt_files(ok.len()), disk::format_size(ok.iter().sum())),
             );
             for (path, r) in results {
                 if let Err(e) = r {
@@ -220,29 +226,34 @@ impl WipeView {
         dialog("wipe_confirm", ctx, |ui| match what {
             Confirm::FreeSpace => {
                 let letter = self.letter.clone().unwrap_or_default();
-                dialog_title(ui, icon::BROOM, theme::DANGER, "Vrije ruimte wissen?", &format!("Schijf {letter}"));
+                dialog_title(ui, icon::BROOM, theme::DANGER, t("Vrije ruimte wissen?", "Wipe free space?"), &tf!("Schijf {letter}", "Drive {letter}"));
                 notice(
                     ui,
                     icon::WARNING_CIRCLE,
                     theme::DANGER,
-                    &format!(
+                    &tf!(
                         "Verwijderde bestanden op {letter} zijn daarna voorgoed weg, ook voor deze app. Wil je nog iets \
-                         herstellen van {letter}, doe dat dan eerst."
+                         herstellen van {letter}, doe dat dan eerst.",
+                        "Deleted files on {letter} are gone for good afterwards, also for this app. If you still want to \
+                         recover something from {letter}, do that first."
                     ),
                 );
                 notice(
                     ui,
                     icon::INFO,
                     theme::ACCENT,
-                    "De schijf is tijdens het wissen even helemaal vol. Sluit andere programma's; de ruimte komt na afloop vanzelf terug.",
+                    t(
+                        "De schijf is tijdens het wissen even helemaal vol. Sluit andere programma's; de ruimte komt na afloop vanzelf terug.",
+                        "The drive is completely full for a while during the wipe. Close other programs; the space comes back afterwards.",
+                    ),
                 );
-                decision = confirm_buttons(ui, "Wissen");
+                decision = confirm_buttons(ui, t("Wissen", "Wipe"));
             }
             Confirm::Files => {
-                let title = format!("{} veilig verwijderen?", ui::fmt_files(self.files.len()));
-                dialog_title(ui, icon::FILE_X, theme::DANGER, &title, "Niet via de prullenbak");
-                notice(ui, icon::WARNING_CIRCLE, theme::DANGER, "Deze bestanden zijn daarna niet meer terug te halen, ook niet met deze app.");
-                decision = confirm_buttons(ui, "Verwijderen");
+                let title = tf!("{} veilig verwijderen?", "Securely delete {}?", ui::fmt_files(self.files.len()));
+                dialog_title(ui, icon::FILE_X, theme::DANGER, &title, t("Niet via de prullenbak", "Not via the Recycle Bin"));
+                notice(ui, icon::WARNING_CIRCLE, theme::DANGER, t("Deze bestanden zijn daarna niet meer terug te halen, ook niet met deze app.", "These files can no longer be recovered afterwards, not even with this app."));
+                decision = confirm_buttons(ui, t("Verwijderen", "Delete"));
             }
         });
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -304,7 +315,7 @@ fn confirm_buttons(ui: &mut egui::Ui, action: &str) -> Option<bool> {
         if ui.add(ui::danger_icon_button(icon::TRASH, action).min_size(vec2(130.0, 36.0))).clicked() {
             decision = Some(true);
         }
-        if ui.add(ui::secondary_icon_button(icon::X, "Annuleren").min_size(vec2(120.0, 36.0))).clicked() {
+        if ui.add(ui::secondary_icon_button(icon::X, t("Annuleren", "Cancel")).min_size(vec2(120.0, 36.0))).clicked() {
             decision = Some(false);
         }
     });

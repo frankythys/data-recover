@@ -2,6 +2,8 @@
 //! at the space it is given, so nothing overflows when panels get narrow.
 
 use crate::disk::{self, DriveKind, VolumeInfo};
+use crate::i18n::{english, t};
+use crate::tf;
 use crate::ntfs::{self, RecoveredFile};
 use crate::theme;
 use egui::{Color32, FontId, Rect, Response, Sense, Stroke, Ui, pos2, vec2};
@@ -13,6 +15,9 @@ pub const ARROW_W: f32 = 18.0;
 
 const MONTHS_SHORT: [&str; 12] = [
     "jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec",
+];
+const MONTHS_SHORT_EN: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
 /// Icon and accent colour for a file category.
@@ -27,13 +32,14 @@ pub fn category_style(category: &str) -> (&'static str, Color32) {
     }
 }
 
-/// 185856 -> "185.856".
+/// 185856 -> "185.856" (English: "185,856").
 pub fn fmt_thousands(n: u64) -> String {
+    let separator = if english() { ',' } else { '.' };
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
         if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push('.');
+            out.push(separator);
         }
         out.push(c);
     }
@@ -43,9 +49,10 @@ pub fn fmt_thousands(n: u64) -> String {
 /// "1 bestand" / "1.234 bestanden".
 pub fn fmt_files(n: usize) -> String {
     if n == 1 {
-        "1 bestand".to_string()
+        t("1 bestand", "1 file").to_string()
     } else {
-        format!("{} bestanden", fmt_thousands(n as u64))
+        let n = fmt_thousands(n as u64);
+        tf!("{n} bestanden", "{n} files")
     }
 }
 
@@ -59,7 +66,8 @@ pub fn fmt_duration(secs: u64) -> String {
 
 /// "dec 2022", or "" when the date is unknown.
 pub fn fmt_month(year: u16, month: u8) -> String {
-    match (year, MONTHS_SHORT.get(month.wrapping_sub(1) as usize)) {
+    let months = if english() { MONTHS_SHORT_EN } else { MONTHS_SHORT };
+    match (year, months.get(month.wrapping_sub(1) as usize)) {
         (0, _) | (_, None) => String::new(),
         (y, Some(m)) => format!("{m} {y}"),
     }
@@ -262,7 +270,7 @@ pub fn logo(ui: &mut Ui) {
     let x = tile.right() + 12.0;
     let max_w = rect.right() - x - 12.0;
     let (title, _) = elided(ui, "DiskTools", theme::font_semibold(16.0), theme::TEXT_MAIN, max_w);
-    let (sub, _) = elided(ui, "Herstel en schijfbeheer", theme::font(12.0), theme::TEXT_DIM, max_w);
+    let (sub, _) = elided(ui, t("Herstel en schijfbeheer", "Recovery and disk management"), theme::font(12.0), theme::TEXT_DIM, max_w);
     let p = ui.painter();
     p.galley(pos2(x, tile.top() - 1.0), title, theme::TEXT_MAIN);
     p.galley(pos2(x, tile.top() + 20.0), sub, theme::TEXT_DIM);
@@ -464,22 +472,19 @@ pub fn volume_card(ui: &mut Ui, width: f32, vol: &VolumeInfo) -> bool {
         bx = badge(ui, pos2(bx, tile.top() + 25.0), &vol.filesystem, theme::TEXT_DIM, theme::SUBTLE_BG) + 6.0;
     }
     if let Some(idx) = vol.disk_index {
-        badge(ui, pos2(bx, tile.top() + 25.0), &format!("Schijf {idx}"), theme::TEXT_DIM, theme::SUBTLE_BG);
+        badge(ui, pos2(bx, tile.top() + 25.0), &tf!("Schijf {idx}", "Disk {idx}"), theme::TEXT_DIM, theme::SUBTLE_BG);
     }
 
     let used = if vol.total_bytes > 0 { vol.used_bytes as f32 / vol.total_bytes as f32 } else { 0.0 };
     let bar_color = if used > 0.9 { theme::DANGER } else { theme::ACCENT };
     let bar = Rect::from_min_max(pos2(rect.left() + 16.0, rect.bottom() - 42.0), pos2(rect.right() - 16.0, rect.bottom() - 36.0));
     progress_bar(ui, bar, used, bar_color);
-    let usage = format!(
-        "{} gebruikt van {}",
-        disk::format_size(vol.used_bytes),
-        disk::format_size(vol.total_bytes)
-    );
+    let (used_size, total_size) = (disk::format_size(vol.used_bytes), disk::format_size(vol.total_bytes));
+    let usage = tf!("{used_size} gebruikt van {total_size}", "{used_size} used of {total_size}");
     ui.painter().text(pos2(bar.left(), rect.bottom() - 18.0), egui::Align2::LEFT_CENTER, usage, theme::font(12.0), theme::TEXT_DIM);
 
     if hovered {
-        let g = ui.painter().layout_job(icon_text_job(icon::MAGNIFYING_GLASS, "Scannen", 13.0, Color32::WHITE));
+        let g = ui.painter().layout_job(icon_text_job(icon::MAGNIFYING_GLASS, t("Scannen", "Scan"), 13.0, Color32::WHITE));
         let pill = Rect::from_min_size(pos2(rect.right() - g.size().x - 34.0, rect.top() + 16.0), vec2(g.size().x + 20.0, 30.0));
         ui.painter().rect_filled(pill, 8.0, theme::ACCENT);
         ui.painter().galley(pos2(pill.left() + 10.0, pill.center().y - g.size().y / 2.0), g, Color32::WHITE);
@@ -501,9 +506,9 @@ pub fn quick_tile(ui: &mut Ui, width: f32, glyph: &str, title: &str, subtitle: &
     let title_color = if enabled { theme::TEXT_MAIN } else { theme::TEXT_DIM };
     let mut right = rect.right() - 14.0;
     if !enabled {
-        let g = ui.painter().layout_no_wrap("Binnenkort".to_owned(), theme::font_medium(10.5), theme::TEXT_DIM);
+        let g = ui.painter().layout_no_wrap(t("Binnenkort", "Coming soon").to_owned(), theme::font_medium(10.5), theme::TEXT_DIM);
         let w = g.size().x + 12.0;
-        badge(ui, pos2(rect.right() - 14.0 - w, rect.top() + 12.0), "Binnenkort", theme::TEXT_DIM, theme::SUBTLE_BG);
+        badge(ui, pos2(rect.right() - 14.0 - w, rect.top() + 12.0), t("Binnenkort", "Coming soon"), theme::TEXT_DIM, theme::SUBTLE_BG);
         right -= w + 6.0;
     }
     let (t, _) = elided(ui, title, theme::font_medium(14.5), title_color, right - x);
@@ -513,7 +518,7 @@ pub fn quick_tile(ui: &mut Ui, width: f32, glyph: &str, title: &str, subtitle: &
     let resp = if enabled {
         resp.on_hover_cursor(egui::CursorIcon::PointingHand)
     } else {
-        resp.on_hover_text("Komt in een volgende versie")
+        resp.on_hover_text(crate::i18n::t("Komt in een volgende versie", "Coming in a later version"))
     };
     enabled && resp.clicked()
 }
@@ -539,7 +544,7 @@ pub fn category_card(ui: &mut Ui, width: f32, name: &str, count: usize, size: u6
     icon_tile(ui, tile, glyph, color, 23.0);
     let x = tile.right() + 14.0;
     let max_w = rect.right() - x - 34.0;
-    let (t, _) = elided(ui, name, theme::font_semibold(15.0), theme::TEXT_MAIN, max_w);
+    let (t, _) = elided(ui, ntfs::category_label(name), theme::font_semibold(15.0), theme::TEXT_MAIN, max_w);
     let meta = format!("{} · {}", fmt_files(count), disk::format_size(size));
     let (m, _) = elided(ui, &meta, theme::font(12.0), theme::TEXT_DIM, max_w);
     ui.painter().galley(pos2(x, rect.top() + 22.0), t, theme::TEXT_MAIN);
@@ -594,7 +599,7 @@ pub fn file_card(
     } else if overwritten {
         ui.painter().rect_filled(thumb, 7.0, theme::SUBTLE_BG);
         ui.painter().text(thumb.center() - vec2(0.0, 9.0), egui::Align2::CENTER_CENTER, icon::WARNING_CIRCLE, theme::icon(26.0), theme::TEXT_FAINT);
-        ui.painter().text(thumb.center() + vec2(0.0, 18.0), egui::Align2::CENTER_CENTER, "Geen voorbeeld", theme::font(11.0), theme::TEXT_DIM);
+        ui.painter().text(thumb.center() + vec2(0.0, 18.0), egui::Align2::CENTER_CENTER, t("Geen voorbeeld", "No preview"), theme::font(11.0), theme::TEXT_DIM);
     } else if matches!(thumb_state, Thumb::Loading) {
         ui.painter().rect_filled(thumb, 7.0, theme::tint(color, 0.08));
         let spin = Rect::from_center_size(thumb.center(), vec2(22.0, 22.0));
@@ -630,12 +635,16 @@ pub fn file_card(
     let (m, _) = elided(ui, &meta, theme::font(11.5), theme::TEXT_DIM, max_w);
     ui.painter().galley(pos2(x, thumb.bottom() + 33.0), m, theme::TEXT_DIM);
 
-    let mut tip = format!("{}\nMap: {}\nGrootte: {}", rf.name, rf.path, disk::format_size(rf.size));
+    let (name, path, size) = (&rf.name, &rf.path, disk::format_size(rf.size));
+    let mut tip = tf!("{name}\nMap: {path}\nGrootte: {size}", "{name}\nFolder: {path}\nSize: {size}");
     if !date.is_empty() {
-        tip.push_str(&format!("\nGewijzigd: {date}"));
+        tip.push_str(&tf!("\nGewijzigd: {date}", "\nModified: {date}"));
     }
     if overwritten {
-        tip.push_str("\n\nData mogelijk al overschreven – herstel kan onvolledig zijn.");
+        tip.push_str(t(
+            "\n\nData mogelijk al overschreven – herstel kan onvolledig zijn.",
+            "\n\nData may already be overwritten – recovery may be incomplete.",
+        ));
     }
     let visible = ui.is_rect_visible(rect);
     resp.on_hover_text(tip);

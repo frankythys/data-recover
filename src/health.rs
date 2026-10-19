@@ -5,6 +5,9 @@
 //! SMART needs administrator rights; without them only model, type, size
 //! and (when Windows knows it) the temperature are shown.
 
+use crate::i18n::t;
+use crate::tf;
+
 /// Bytes per NVMe "data unit" (1000 sectors of 512 bytes).
 const NVME_DATA_UNIT: u64 = 512_000;
 /// From these temperatures on a disk is reported as warm.
@@ -134,7 +137,7 @@ impl DiskHealth {
         if let Some(t) = s.temperature {
             let warm = if self.is_ssd() { WARM_SSD_C } else { WARM_HDD_C };
             if t >= warm {
-                s.issues.push((Status::Caution, format!("De schijf is warm ({t} °C). Zorg voor betere koeling.")));
+                s.issues.push((Status::Caution, tf!("De schijf is warm ({t} °C). Zorg voor betere koeling.", "The disk is warm ({t} °C). Improve the cooling.")));
             }
         }
         if matches!(self.smart, Smart::Nvme(_) | Smart::Ata(_)) {
@@ -148,30 +151,30 @@ impl DiskHealth {
 
 fn nvme_summary(log: &NvmeLog) -> Summary {
     let mut issues = Vec::new();
-    const WARNINGS: [(u8, &str); 5] = [
-        (0x01, "De reserve-opslag is bijna op."),
-        (0x02, "De temperatuur is buiten het veilige bereik geweest."),
-        (0x04, "De schijf meldt zelf dat hij onbetrouwbaar wordt."),
-        (0x08, "De schijf staat in alleen-lezen-modus."),
-        (0x10, "De back-up van het werkgeheugen van de schijf werkt niet."),
+    let warnings = [
+        (0x01, t("De reserve-opslag is bijna op.", "The spare capacity is nearly used up.")),
+        (0x02, t("De temperatuur is buiten het veilige bereik geweest.", "The temperature has been outside the safe range.")),
+        (0x04, t("De schijf meldt zelf dat hij onbetrouwbaar wordt.", "The disk itself reports it is becoming unreliable.")),
+        (0x08, t("De schijf staat in alleen-lezen-modus.", "The disk is in read-only mode.")),
+        (0x10, t("De back-up van het werkgeheugen van de schijf werkt niet.", "The backup of the disk's volatile memory has failed.")),
     ];
-    for (bit, text) in WARNINGS {
+    for (bit, text) in warnings {
         if log.critical_warning & bit != 0 {
             issues.push((Status::Bad, text.to_string()));
         }
     }
     if log.available_spare < log.spare_threshold && log.critical_warning & 0x01 == 0 {
-        issues.push((Status::Bad, format!("Nog maar {}% reserve-opslag over.", log.available_spare)));
+        issues.push((Status::Bad, tf!("Nog maar {}% reserve-opslag over.", "Only {}% spare capacity left.", log.available_spare)));
     }
     let used = log.percentage_used.min(100);
     let life_left = 100 - used;
     if used >= 100 {
-        issues.push((Status::Bad, "De opgegeven levensduur is bereikt. Vervang de schijf binnenkort.".to_string()));
+        issues.push((Status::Bad, end_of_life()));
     } else if life_left <= LOW_LIFE_PERCENT {
-        issues.push((Status::Caution, format!("Nog ongeveer {life_left}% levensduur over.")));
+        issues.push((Status::Caution, tf!("Nog ongeveer {life_left}% levensduur over.", "About {life_left}% of its life left.")));
     }
     if log.media_errors > 0 {
-        issues.push((Status::Caution, format!("{} keer kon de schijf gegevens niet goed lezen of schrijven.", log.media_errors)));
+        issues.push((Status::Caution, tf!("{} keer kon de schijf gegevens niet goed lezen of schrijven.", "{} times the disk could not read or write data correctly.", log.media_errors)));
     }
     let temperature = (log.temperature_kelvin > 0).then(|| i32::from(log.temperature_kelvin) - 273);
     Summary {
@@ -191,15 +194,15 @@ fn ata_summary(attrs: &[AtaAttribute]) -> Summary {
     let mut issues = Vec::new();
     for a in attrs {
         if a.threshold > 0 && a.current > 0 && a.current <= a.threshold {
-            issues.push((Status::Bad, format!("{} is onder de grens van de fabrikant.", attribute_name(a.id))));
+            issues.push((Status::Bad, tf!("{} is onder de grens van de fabrikant.", "{} is below the maker's threshold.", attribute_name(a.id))));
         }
     }
-    const COUNTERS: [(u8, &str); 3] = [
-        (5, "sectoren zijn al vervangen door reserve-sectoren."),
-        (197, "sectoren zijn onbetrouwbaar en wachten op vervanging."),
-        (198, "sectoren konden niet meer gelezen worden."),
+    let counters = [
+        (5, t("sectoren zijn al vervangen door reserve-sectoren.", "sectors have already been replaced by spare sectors.")),
+        (197, t("sectoren zijn onbetrouwbaar en wachten op vervanging.", "sectors are unstable and waiting to be replaced.")),
+        (198, t("sectoren konden niet meer gelezen worden.", "sectors could no longer be read.")),
     ];
-    for (id, text) in COUNTERS {
+    for (id, text) in counters {
         if let Some(n) = find(id).map(AtaAttribute::count).filter(|&n| n > 0) {
             issues.push((Status::Caution, format!("{n} {text}")));
         }
@@ -209,9 +212,9 @@ fn ata_summary(attrs: &[AtaAttribute]) -> Summary {
     let life_left = [231, 233, 177, 202, 169].iter().find_map(|&id| find(id)).map(|a| a.current.min(100));
     if let Some(left) = life_left {
         if left == 0 {
-            issues.push((Status::Bad, "De opgegeven levensduur is bereikt. Vervang de schijf binnenkort.".to_string()));
+            issues.push((Status::Bad, end_of_life()));
         } else if left <= LOW_LIFE_PERCENT {
-            issues.push((Status::Caution, format!("Nog ongeveer {left}% levensduur over.")));
+            issues.push((Status::Caution, tf!("Nog ongeveer {left}% levensduur over.", "About {left}% of its life left.")));
         }
     }
     let temperature = find(194).or_else(|| find(190)).map(|a| (a.raw & 0xFF) as i32).filter(|&t| t > 0);
@@ -227,57 +230,65 @@ fn ata_summary(attrs: &[AtaAttribute]) -> Summary {
     }
 }
 
-/// Dutch name of a SATA SMART attribute.
+fn end_of_life() -> String {
+    t(
+        "De opgegeven levensduur is bereikt. Vervang de schijf binnenkort.",
+        "The rated life has been reached. Replace the disk soon.",
+    )
+    .to_string()
+}
+
+/// Name of a SATA SMART attribute.
 pub fn attribute_name(id: u8) -> &'static str {
     match id {
-        1 => "Leesfouten",
-        2 => "Doorvoer",
-        3 => "Opstarttijd",
-        4 => "Aantal keer gestart",
-        5 => "Vervangen sectoren",
-        7 => "Zoekfouten",
-        8 => "Zoeksnelheid",
-        9 => "Uren in gebruik",
-        10 => "Herhaalde opstartpogingen",
-        11 => "Herhaalde kalibraties",
-        12 => "Aantal keer aangezet",
-        13 => "Zachte leesfouten",
-        169 => "Resterende levensduur",
-        170 => "Beschikbare reserveblokken",
-        171 => "Programmeerfouten",
-        172 => "Wisfouten",
-        173 => "Slijtage",
-        174 => "Onverwacht uitgeschakeld",
-        177 => "Slijtage-egalisatie",
-        179 => "Gebruikte reserveblokken",
-        181 => "Programmeerfouten",
-        182 => "Wisfouten",
-        183 => "Teruggeschakelde snelheid",
-        184 => "Fouten van begin tot eind",
-        187 => "Gemelde onherstelbare fouten",
-        188 => "Time-outs van commando's",
-        189 => "Hoog vliegende kop",
-        190 => "Luchtstroomtemperatuur",
-        191 => "Schokken",
-        192 => "Noodparkeringen",
-        193 => "Parkeercycli",
-        194 => "Temperatuur",
-        195 => "Gecorrigeerde fouten (ECC)",
-        196 => "Vervangingen",
-        197 => "Wachtende sectoren",
-        198 => "Onherstelbare sectoren",
-        199 => "Overdrachtsfouten (kabel)",
-        200 => "Schrijffouten",
-        202 => "Gebruikte levensduur",
-        206 => "Kop-afstand",
-        231 => "Resterende levensduur",
-        232 => "Beschikbare reserve",
-        233 => "Slijtage-indicator",
-        235 => "Stroomstoringen",
-        240 => "Uren kop in gebruik",
-        241 => "Totaal geschreven",
-        242 => "Totaal gelezen",
-        _ => "Fabrikantspecifiek",
+        1 => t("Leesfouten", "Read errors"),
+        2 => t("Doorvoer", "Throughput"),
+        3 => t("Opstarttijd", "Spin-up time"),
+        4 => t("Aantal keer gestart", "Start/stop count"),
+        5 => t("Vervangen sectoren", "Reallocated sectors"),
+        7 => t("Zoekfouten", "Seek errors"),
+        8 => t("Zoeksnelheid", "Seek time"),
+        9 => t("Uren in gebruik", "Power-on hours"),
+        10 => t("Herhaalde opstartpogingen", "Spin retries"),
+        11 => t("Herhaalde kalibraties", "Calibration retries"),
+        12 => t("Aantal keer aangezet", "Power cycles"),
+        13 => t("Zachte leesfouten", "Soft read errors"),
+        169 => t("Resterende levensduur", "Remaining life"),
+        170 => t("Beschikbare reserveblokken", "Available reserved blocks"),
+        171 => t("Programmeerfouten", "Program fails"),
+        172 => t("Wisfouten", "Erase fails"),
+        173 => t("Slijtage", "Wear"),
+        174 => t("Onverwacht uitgeschakeld", "Unexpected power loss"),
+        177 => t("Slijtage-egalisatie", "Wear leveling"),
+        179 => t("Gebruikte reserveblokken", "Used reserved blocks"),
+        181 => t("Programmeerfouten", "Program fails"),
+        182 => t("Wisfouten", "Erase fails"),
+        183 => t("Teruggeschakelde snelheid", "Runtime bad blocks / downshifts"),
+        184 => t("Fouten van begin tot eind", "End-to-end errors"),
+        187 => t("Gemelde onherstelbare fouten", "Reported uncorrectable errors"),
+        188 => t("Time-outs van commando's", "Command timeouts"),
+        189 => t("Hoog vliegende kop", "High fly writes"),
+        190 => t("Luchtstroomtemperatuur", "Airflow temperature"),
+        191 => t("Schokken", "G-sense errors"),
+        192 => t("Noodparkeringen", "Emergency retracts"),
+        193 => t("Parkeercycli", "Load cycles"),
+        194 => t("Temperatuur", "Temperature"),
+        195 => t("Gecorrigeerde fouten (ECC)", "Corrected errors (ECC)"),
+        196 => t("Vervangingen", "Reallocation events"),
+        197 => t("Wachtende sectoren", "Pending sectors"),
+        198 => t("Onherstelbare sectoren", "Uncorrectable sectors"),
+        199 => t("Overdrachtsfouten (kabel)", "Transfer errors (cable)"),
+        200 => t("Schrijffouten", "Write errors"),
+        202 => t("Gebruikte levensduur", "Life used"),
+        206 => t("Kop-afstand", "Fly height"),
+        231 => t("Resterende levensduur", "Remaining life"),
+        232 => t("Beschikbare reserve", "Available reserve"),
+        233 => t("Slijtage-indicator", "Wearout indicator"),
+        235 => t("Stroomstoringen", "Power failures"),
+        240 => t("Uren kop in gebruik", "Head flying hours"),
+        241 => t("Totaal geschreven", "Total written"),
+        242 => t("Totaal gelezen", "Total read"),
+        _ => t("Fabrikantspecifiek", "Vendor specific"),
     }
 }
 

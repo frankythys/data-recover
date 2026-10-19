@@ -2,6 +2,7 @@
 //! emulators, Docker, build caches). Each one says how to clean it up
 //! safely; only caches and model files can be removed from the app.
 
+use crate::i18n::t;
 use crate::junk::{self, CleanReport};
 use crate::largefiles::LargeFile;
 use std::path::{Path, PathBuf};
@@ -72,88 +73,131 @@ pub fn known_spots() -> Vec<Spot> {
 
     vec![
         spot(
-            "ComfyUI-modellen",
-            "Modellen die je niet meer gebruikt kun je weggooien; ComfyUI kan ze later opnieuw downloaden. \
-             Kies 'Modellen bekijken'.",
+            t("ComfyUI-modellen", "ComfyUI models"),
+            t(
+                "Modellen die je niet meer gebruikt kun je weggooien; ComfyUI kan ze later opnieuw downloaden. \
+                 Kies 'Modellen bekijken'.",
+                "Models you no longer use can go; ComfyUI can download them again later. Choose 'View models'.",
+            ),
             Cleanup::Models,
             vec![local.join("Comfy-Desktop")],
         ),
         spot(
-            "LM Studio-modellen",
-            "Verwijder modellen in LM Studio (My Models) of hier via 'Modellen bekijken'.",
+            t("LM Studio-modellen", "LM Studio models"),
+            t(
+                "Verwijder modellen in LM Studio (My Models) of hier via 'Modellen bekijken'.",
+                "Remove models in LM Studio (My Models) or here via 'View models'.",
+            ),
             Cleanup::Models,
             vec![home.join(".lmstudio").join("models"), home.join(".cache").join("lm-studio")],
         ),
         spot(
-            "Ollama-modellen",
-            "Ruim op via de opdrachtprompt: 'ollama list' toont je modellen, 'ollama rm <naam>' verwijdert er één. \
-             Niet met de hand verwijderen.",
+            t("Ollama-modellen", "Ollama models"),
+            t(
+                "Ruim op via de opdrachtprompt: 'ollama list' toont je modellen, 'ollama rm <naam>' verwijdert er één. \
+                 Niet met de hand verwijderen.",
+                "Clean up from the command prompt: 'ollama list' shows your models, 'ollama rm <name>' removes one. \
+                 Do not delete them by hand.",
+            ),
             Cleanup::Advice,
             vec![home.join(".ollama")],
         ),
         spot(
-            "Hugging Face-modellen",
-            "Ruim op met 'huggingface-cli delete-cache' (kiest per model wat weg mag).",
+            t("Hugging Face-modellen", "Hugging Face models"),
+            t(
+                "Ruim op met 'huggingface-cli delete-cache' (kiest per model wat weg mag).",
+                "Clean up with 'huggingface-cli delete-cache' (lets you pick per model).",
+            ),
             Cleanup::Advice,
             vec![home.join(".cache").join("huggingface")],
         ),
         spot(
-            "Android-emulators",
-            "Verwijder emulators die je niet gebruikt in Android Studio: Device Manager → menu (drie puntjes) → Delete.",
+            t("Android-emulators", "Android emulators"),
+            t(
+                "Verwijder emulators die je niet gebruikt in Android Studio: Device Manager → menu (drie puntjes) → Delete.",
+                "Remove emulators you do not use in Android Studio: Device Manager → menu (three dots) → Delete.",
+            ),
             Cleanup::Advice,
             vec![home.join(".android").join("avd")],
         ),
         spot(
             "Android SDK",
-            "Verwijder oude SDK-versies en systeemimages in Android Studio: Settings → Android SDK.",
+            t(
+                "Verwijder oude SDK-versies en systeemimages in Android Studio: Settings → Android SDK.",
+                "Remove old SDK versions and system images in Android Studio: Settings → Android SDK.",
+            ),
             Cleanup::Advice,
             vec![local.join("Android").join("Sdk")],
         ),
         spot(
             "Docker",
-            "Ruim op in Docker Desktop: Troubleshoot → Clean / Purge data, of 'docker system prune -a'.",
+            t(
+                "Ruim op in Docker Desktop: Troubleshoot → Clean / Purge data, of 'docker system prune -a'.",
+                "Clean up in Docker Desktop: Troubleshoot → Clean / Purge data, or 'docker system prune -a'.",
+            ),
             Cleanup::Advice,
             vec![local.join("Docker")],
         ),
         spot(
             "WSL (Ubuntu)",
-            "Dit is de schijf van je Linux-omgeving. Ruim bestanden op binnen Ubuntu; niet hier verwijderen.",
+            t(
+                "Dit is de schijf van je Linux-omgeving. Ruim bestanden op binnen Ubuntu; niet hier verwijderen.",
+                "This is the disk of your Linux environment. Clean up files inside Ubuntu; do not delete it here.",
+            ),
             Cleanup::Advice,
             wsl,
         ),
         spot(
-            "Claude-app",
-            "Bestanden van de Claude-app (o.a. de virtuele machine). Niet verwijderen.",
+            t("Claude-app", "Claude app"),
+            t(
+                "Bestanden van de Claude-app (o.a. de virtuele machine). Niet verwijderen.",
+                "Files of the Claude app (including its virtual machine). Do not delete.",
+            ),
             Cleanup::Advice,
             claude,
         ),
         spot(
-            "Gradle-cache",
-            "Downloads en builds van Gradle (Android). Mag leeg; wordt bij de volgende build opnieuw opgebouwd.",
+            t("Gradle-cache", "Gradle cache"),
+            t(
+                "Downloads en builds van Gradle (Android). Mag leeg; wordt bij de volgende build opnieuw opgebouwd.",
+                "Downloads and builds of Gradle (Android). Can be emptied; rebuilt on the next build.",
+            ),
             Cleanup::Cache,
             vec![home.join(".gradle").join("caches")],
         ),
         spot(
-            "npm-cache",
-            "Gedownloade JavaScript-pakketten. Mag leeg; npm haalt ze opnieuw op als dat nodig is.",
+            t("npm-cache", "npm cache"),
+            t(
+                "Gedownloade JavaScript-pakketten. Mag leeg; npm haalt ze opnieuw op als dat nodig is.",
+                "Downloaded JavaScript packages. Can be emptied; npm fetches them again when needed.",
+            ),
             Cleanup::Cache,
             vec![local.join("npm-cache")],
         ),
         spot(
-            "pip-cache",
-            "Gedownloade Python-pakketten. Mag leeg; pip haalt ze opnieuw op als dat nodig is.",
+            t("pip-cache", "pip cache"),
+            t(
+                "Gedownloade Python-pakketten. Mag leeg; pip haalt ze opnieuw op als dat nodig is.",
+                "Downloaded Python packages. Can be emptied; pip fetches them again when needed.",
+            ),
             Cleanup::Cache,
             vec![local.join("pip").join("Cache")],
         ),
         spot(
-            "NuGet-pakketten",
-            "Gedownloade .NET-pakketten. Mag leeg; ze worden bij de volgende build opnieuw opgehaald.",
+            t("NuGet-pakketten", "NuGet packages"),
+            t(
+                "Gedownloade .NET-pakketten. Mag leeg; ze worden bij de volgende build opnieuw opgehaald.",
+                "Downloaded .NET packages. Can be emptied; they are fetched again on the next build.",
+            ),
             Cleanup::Cache,
             vec![home.join(".nuget").join("packages")],
         ),
         spot(
-            "Cargo-register",
-            "Gedownloade Rust-crates. Mag leeg; cargo haalt ze opnieuw op bij de volgende build.",
+            t("Cargo-register", "Cargo registry"),
+            t(
+                "Gedownloade Rust-crates. Mag leeg; cargo haalt ze opnieuw op bij de volgende build.",
+                "Downloaded Rust crates. Can be emptied; cargo fetches them again on the next build.",
+            ),
             Cleanup::Cache,
             vec![home.join(".cargo").join("registry")],
         ),
@@ -179,8 +223,11 @@ pub fn other_program_folders(known: &[Spot]) -> Vec<Spot> {
             if !skip {
                 out.push(Spot {
                     title: entry.file_name().to_string_lossy().into_owned(),
-                    advice: "Gegevens van een programma. Gebruik je het niet meer? Verwijder het programma via \
-                             Instellingen → Apps.",
+                    advice: t(
+                        "Gegevens van een programma. Gebruik je het niet meer? Verwijder het programma via \
+                         Instellingen → Apps.",
+                        "Data of a program. No longer using it? Uninstall the program via Settings → Apps.",
+                    ),
                     cleanup: Cleanup::Advice,
                     folders: vec![path],
                 });

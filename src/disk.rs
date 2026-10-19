@@ -32,7 +32,7 @@ impl VolumeInfo {
     /// Label + letter the way the card shows it, e.g. `Windows-SSD (C:)`.
     pub fn display_name(&self) -> String {
         if self.label.is_empty() {
-            format!("Lokale schijf ({})", self.letter)
+            crate::tf!("Lokale schijf ({})", "Local disk ({})", self.letter)
         } else {
             format!("{} ({})", self.label, self.letter)
         }
@@ -309,6 +309,7 @@ pub fn format_size(bytes: u64) -> String {
         size /= 1024.0;
         unit += 1;
     }
-    // Dutch decimal comma to match the UI.
-    format!("{size:.2} {}", UNITS[unit]).replace('.', ",")
+    // Dutch uses a decimal comma.
+    let text = format!("{size:.2} {}", UNITS[unit]);
+    if crate::i18n::english() { text } else { text.replace('.', ",") }
 }

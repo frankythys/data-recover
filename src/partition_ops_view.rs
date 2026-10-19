@@ -2,6 +2,8 @@
 //! operation, the queue ("Wachtende bewerkingen") and applying it in one go
 //! after confirmation, with the outcome in a dialog.
 
+use crate::i18n::t;
+use crate::tf;
 use crate::cleanup::{dialog, dialog_title, dim_background, notice};
 use crate::disk::{self, VolumeInfo};
 use crate::partition_ops::{self, Fs, Guard, PartOp, Target};
@@ -94,7 +96,7 @@ pub struct OpsPanel {
 /// Name of a partition for the user: its drive letter and label if it has
 /// one, otherwise its number.
 pub fn part_name(p: &PartInfo, disk: u32, volume: Option<&VolumeInfo>) -> String {
-    volume.map_or_else(|| format!("Partitie {} (schijf {disk})", p.number), VolumeInfo::display_name)
+    volume.map_or_else(|| tf!("Partitie {} (schijf {disk})", "Partition {} (disk {disk})", p.number), VolumeInfo::display_name)
 }
 
 impl OpsPanel {
@@ -187,7 +189,7 @@ impl OpsPanel {
             ui.add_space(4.0);
         }
         if self.queue.is_empty() {
-            ui.label(egui::RichText::new("Geen").color(theme::TEXT_FAINT));
+            ui.label(egui::RichText::new(t("Geen", "None")).color(theme::TEXT_FAINT));
             return;
         }
         let mut remove = None;
@@ -199,7 +201,7 @@ impl OpsPanel {
                 ui.allocate_ui_with_layout(vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                     ui.add(egui::Label::new(text).wrap());
                 });
-                if ui::icon_button(ui, icon::X, "Uit de wachtrij halen").clicked() {
+                if ui::icon_button(ui, icon::X, t("Uit de wachtrij halen", "Remove from the queue")).clicked() {
                     remove = Some(i);
                 }
             });
@@ -209,7 +211,7 @@ impl OpsPanel {
             self.queue.remove(i);
         }
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("Er verandert pas iets na Toepassen.").size(12.0).color(theme::TEXT_DIM));
+        ui.label(egui::RichText::new(t("Er verandert pas iets na Toepassen.", "Nothing changes until you click Apply.")).size(12.0).color(theme::TEXT_DIM));
     }
 
     /// The open dialog: an operation, the apply confirmation, the progress
@@ -246,7 +248,7 @@ impl OpsPanel {
             ui.add_space(8.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if info_only {
-                    if ui.add(ui::secondary_icon_button(icon::X, "Sluiten").min_size(vec2(120.0, 36.0))).clicked() {
+                    if ui.add(ui::secondary_icon_button(icon::X, t("Sluiten", "Close")).min_size(vec2(120.0, 36.0))).clicked() {
                         decision = Some(None);
                     }
                     return;
@@ -254,14 +256,14 @@ impl OpsPanel {
                 let ok = candidate.is_some() && refusal.is_none();
                 let destructive = candidate.as_ref().is_some_and(PartOp::is_destructive);
                 let button = if destructive {
-                    ui::danger_icon_button(icon::PLUS, "In de wachtrij")
+                    ui::danger_icon_button(icon::PLUS, t("In de wachtrij", "Add to queue"))
                 } else {
-                    ui::primary_icon_button(icon::PLUS, "In de wachtrij")
+                    ui::primary_icon_button(icon::PLUS, t("In de wachtrij", "Add to queue"))
                 };
                 if ui.add_enabled(ok, button.min_size(vec2(140.0, 36.0))).clicked() {
                     decision = Some(candidate.clone());
                 }
-                if ui.add(ui::secondary_icon_button(icon::X, "Annuleren").min_size(vec2(120.0, 36.0))).clicked() {
+                if ui.add(ui::secondary_icon_button(icon::X, t("Annuleren", "Cancel")).min_size(vec2(120.0, 36.0))).clicked() {
                     decision = Some(None);
                 }
             });
@@ -282,7 +284,7 @@ impl OpsPanel {
         let destructive = self.queue.iter().any(PartOp::is_destructive);
         dim_background(ctx);
         dialog("partition_apply", ctx, |ui| {
-            dialog_title(ui, icon::CHECK, theme::ACCENT, "Bewerkingen toepassen?", &format!("{} bewerkingen", self.queue.len()));
+            dialog_title(ui, icon::CHECK, theme::ACCENT, t("Bewerkingen toepassen?", "Apply operations?"), &tf!("{} bewerkingen", "{} operations", self.queue.len()));
             for (i, op) in self.queue.iter().enumerate() {
                 let color = if op.is_destructive() { theme::DANGER } else { theme::TEXT_MAIN };
                 ui.label(egui::RichText::new(format!("{}. {}", i + 1, op.describe())).color(color));
@@ -293,22 +295,28 @@ impl OpsPanel {
                     ui,
                     icon::WARNING_CIRCLE,
                     theme::DANGER,
-                    "De rode bewerkingen wissen alle bestanden op die partities. Wil je daar nog iets van herstellen, doe dat dan eerst.",
+                    t(
+                        "De rode bewerkingen wissen alle bestanden op die partities. Wil je daar nog iets van herstellen, doe dat dan eerst.",
+                        "The red operations erase all files on those partitions. If you still want to recover anything from them, do that first.",
+                    ),
                 );
             }
             notice(
                 ui,
                 icon::INFO,
                 theme::ACCENT,
-                "Windows voert de bewerkingen een voor een uit. Lukt er een niet, dan stopt het daar. Maak bij belangrijke gegevens eerst een back-up.",
+                t(
+                    "Windows voert de bewerkingen een voor een uit. Lukt er een niet, dan stopt het daar. Maak bij belangrijke gegevens eerst een back-up.",
+                    "Windows carries out the operations one by one. If one fails, it stops there. Back up important data first.",
+                ),
             );
             ui.add_space(8.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let button = if destructive { ui::danger_icon_button(icon::CHECK, "Toepassen") } else { ui::primary_icon_button(icon::CHECK, "Toepassen") };
+                let button = if destructive { ui::danger_icon_button(icon::CHECK, t("Toepassen", "Apply")) } else { ui::primary_icon_button(icon::CHECK, t("Toepassen", "Apply")) };
                 if ui.add(button.min_size(vec2(130.0, 36.0))).clicked() {
                     decision = Some(true);
                 }
-                if ui.add(ui::secondary_icon_button(icon::X, "Annuleren").min_size(vec2(120.0, 36.0))).clicked() {
+                if ui.add(ui::secondary_icon_button(icon::X, t("Annuleren", "Cancel")).min_size(vec2(120.0, 36.0))).clicked() {
                     decision = Some(false);
                 }
             });
@@ -331,7 +339,7 @@ impl OpsPanel {
         let r = job.progress.lock().unwrap().clone();
         dim_background(ctx);
         dialog("partition_running", ctx, |ui| {
-            dialog_title(ui, icon::GEAR, theme::ACCENT, "Bewerkingen uitvoeren…", &format!("Bewerking {} van {}", r.done + 1, job.total));
+            dialog_title(ui, icon::GEAR, theme::ACCENT, t("Bewerkingen uitvoeren…", "Running operations…"), &tf!("Bewerking {} van {}", "Operation {} of {}", r.done + 1, job.total));
             ui.label(egui::RichText::new(&r.current).font(theme::font_medium(14.0)));
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -344,16 +352,16 @@ impl OpsPanel {
                 ui.label(egui::RichText::new(pct).font(theme::font_semibold(14.0)));
             });
             ui.add_space(2.0);
-            ui.label(egui::RichText::new(format!("Bezig sinds {}", ui::fmt_duration(r.started.elapsed().as_secs()))).color(theme::TEXT_DIM));
+            ui.label(egui::RichText::new(tf!("Bezig sinds {}", "Running for {}", ui::fmt_duration(r.started.elapsed().as_secs()))).color(theme::TEXT_DIM));
             if r.percent.is_none() {
                 ui.label(
-                    egui::RichText::new("Windows meldt hierbij (nog) geen percentage. Bij grote schijven kan dit enkele minuten duren.")
+                    egui::RichText::new(t("Windows meldt hierbij (nog) geen percentage. Bij grote schijven kan dit enkele minuten duren.", "Windows reports no percentage for this (yet). On large disks this can take several minutes."))
                         .size(12.5)
                         .color(theme::TEXT_DIM),
                 );
             }
             ui.add_space(4.0);
-            notice(ui, icon::INFO, theme::ACCENT, "Sluit de app niet tot alles klaar is.");
+            notice(ui, icon::INFO, theme::ACCENT, t("Sluit de app niet tot alles klaar is.", "Do not close the app until everything is done."));
         });
         // Keep the clock and the moving bar going.
         ctx.request_repaint_after(Duration::from_millis(50));
@@ -366,11 +374,11 @@ impl OpsPanel {
         dim_background(ctx);
         dialog("partition_outcome", ctx, |ui| {
             let (glyph, color, title) = if failed {
-                (icon::WARNING_CIRCLE, theme::DANGER, "Niet alles is gelukt")
+                (icon::WARNING_CIRCLE, theme::DANGER, t("Niet alles is gelukt", "Not everything worked"))
             } else {
-                (icon::CHECK_CIRCLE, theme::SUCCESS, "Klaar")
+                (icon::CHECK_CIRCLE, theme::SUCCESS, t("Klaar", "Done"))
             };
-            dialog_title(ui, glyph, color, title, &format!("{} bewerkingen", outcome.len()));
+            dialog_title(ui, glyph, color, title, &tf!("{} bewerkingen", "{} operations", outcome.len()));
             for (text, result) in outcome {
                 let (glyph, color, detail) = match result {
                     Ok(msg) => (icon::CHECK_CIRCLE, theme::SUCCESS, msg.as_str()),
@@ -386,7 +394,7 @@ impl OpsPanel {
             }
             ui.add_space(8.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                close = ui.add(ui::primary_icon_button(icon::CHECK, "Sluiten").min_size(vec2(120.0, 36.0))).clicked();
+                close = ui.add(ui::primary_icon_button(icon::CHECK, t("Sluiten", "Close")).min_size(vec2(120.0, 36.0))).clicked();
             });
         });
         if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -405,7 +413,7 @@ impl OpsPanel {
             let mut failed = false;
             for (i, op) in ops.iter().enumerate() {
                 if failed {
-                    outcome.push((op.describe(), Err("Niet uitgevoerd omdat een eerdere bewerking mislukte.".to_string())));
+                    outcome.push((op.describe(), Err(t("Niet uitgevoerd omdat een eerdere bewerking mislukte.", "Not carried out because an earlier operation failed.").to_string())));
                     continue;
                 }
                 *thread_progress.lock().unwrap() = Running { done: i, current: op.describe(), percent: None, started: Instant::now() };
@@ -439,7 +447,7 @@ fn moving_bar(ui: &egui::Ui, bar: egui::Rect) {
 fn draw_dialog(ui: &mut egui::Ui, state: &mut Dialog, guard: &Guard) -> Option<PartOp> {
     match state {
         Dialog::Resize { target, from, rx, range, gb } => {
-            dialog_title(ui, icon::ARROWS_OUT_LINE_HORIZONTAL, theme::ACCENT, "Vergroten of verkleinen", &target.name);
+            dialog_title(ui, icon::ARROWS_OUT_LINE_HORIZONTAL, theme::ACCENT, t("Vergroten of verkleinen", "Grow or shrink"), &target.name);
             if let Some(r) = rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
                 *range = Some(r);
                 *rx = None;
@@ -448,7 +456,7 @@ fn draw_dialog(ui: &mut egui::Ui, state: &mut Dialog, guard: &Guard) -> Option<P
                 None => {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(16.0).color(theme::ACCENT));
-                        ui.label("Windows berekent wat kan…");
+                        ui.label(t("Windows berekent wat kan…", "Windows is working out what is possible…"));
                     });
                     None
                 }
@@ -458,17 +466,17 @@ fn draw_dialog(ui: &mut egui::Ui, state: &mut Dialog, guard: &Guard) -> Option<P
                 }
                 Some(Ok((min, max))) => {
                     let (min, max) = (*min, *max);
-                    ui.label(format!("Nu {} · kan van {} tot {}", disk::format_size(*from), disk::format_size(min), disk::format_size(max)));
+                    ui.label(tf!("Nu {} · kan van {} tot {}", "Now {} · possible from {} to {}", disk::format_size(*from), disk::format_size(min), disk::format_size(max)));
                     ui.add(egui::Slider::new(gb, min as f64 / GIB..=max as f64 / GIB).suffix(" GB").max_decimals(2));
                     let to = if *gb >= max as f64 / GIB - 0.005 { max } else { ((*gb * GIB) as u64 / MIB * MIB).clamp(min, max) };
-                    notice(ui, icon::INFO, theme::ACCENT, "Vergroten kan alleen in vrije ruimte direct achter de partitie. De bestanden blijven staan.");
+                    notice(ui, icon::INFO, theme::ACCENT, t("Vergroten kan alleen in vrije ruimte direct achter de partitie. De bestanden blijven staan.", "Growing is only possible into free space right after the partition. Your files stay."));
                     Some(PartOp::Resize { target: target.clone(), from: *from, to })
                 }
             }
         }
         Dialog::Create { disk, offset, max, gb, fs, label, letter } => {
-            dialog_title(ui, icon::PLUS, theme::ACCENT, "Nieuwe partitie", &format!("Schijf {disk} · {} vrij", disk::format_size(*max)));
-            ui.add(egui::Slider::new(gb, 0.01..=*max as f64 / GIB).text("Grootte").suffix(" GB").max_decimals(2));
+            dialog_title(ui, icon::PLUS, theme::ACCENT, t("Nieuwe partitie", "New partition"), &tf!("Schijf {disk} · {} vrij", "Disk {disk} · {} free", disk::format_size(*max)));
+            ui.add(egui::Slider::new(gb, 0.01..=*max as f64 / GIB).text(t("Grootte", "Size")).suffix(" GB").max_decimals(2));
             fs_combo(ui, "create_fs", fs);
             label_edit(ui, label);
             letter_combo(ui, "create_letter", letter, guard, true);
@@ -476,42 +484,46 @@ fn draw_dialog(ui: &mut egui::Ui, state: &mut Dialog, guard: &Guard) -> Option<P
             (size >= MIB).then(|| PartOp::Create { disk: *disk, offset: *offset, size, fs: *fs, label: label.clone(), letter: *letter })
         }
         Dialog::Letter { target, letter } => {
-            dialog_title(ui, icon::HASH, theme::ACCENT, "Stationsletter wijzigen", &target.name);
+            dialog_title(ui, icon::HASH, theme::ACCENT, t("Stationsletter wijzigen", "Change drive letter"), &target.name);
             letter_combo(ui, "set_letter", letter, guard, false);
-            notice(ui, icon::INFO, theme::ACCENT, "Programma's die naar de oude letter verwijzen, vinden hun bestanden daarna mogelijk niet meer.");
+            notice(ui, icon::INFO, theme::ACCENT, t("Programma's die naar de oude letter verwijzen, vinden hun bestanden daarna mogelijk niet meer.", "Programs that refer to the old letter may no longer find their files."));
             letter.map(|l| PartOp::SetLetter { target: target.clone(), letter: l })
         }
         Dialog::Label { target, label } => {
-            dialog_title(ui, icon::TAG, theme::ACCENT, "Label wijzigen", &target.name);
+            dialog_title(ui, icon::TAG, theme::ACCENT, t("Label wijzigen", "Change label"), &target.name);
             label_edit(ui, label);
             Some(PartOp::SetLabel { target: target.clone(), label: label.clone() })
         }
         Dialog::Format { target, fs, label } => {
-            dialog_title(ui, icon::ERASER, theme::DANGER, "Formatteren", &target.name);
+            dialog_title(ui, icon::ERASER, theme::DANGER, t("Formatteren", "Format"), &target.name);
             fs_combo(ui, "format_fs", fs);
             label_edit(ui, label);
-            notice(ui, icon::WARNING_CIRCLE, theme::DANGER, "Alle bestanden op deze partitie worden gewist.");
+            notice(ui, icon::WARNING_CIRCLE, theme::DANGER, t("Alle bestanden op deze partitie worden gewist.", "All files on this partition are erased."));
             Some(PartOp::Format { target: target.clone(), fs: *fs, label: label.clone() })
         }
         Dialog::Wipe { target, fs } => {
-            dialog_title(ui, icon::BROOM, theme::DANGER, "Partitie wissen", &target.name);
+            dialog_title(ui, icon::BROOM, theme::DANGER, t("Partitie wissen", "Wipe partition"), &target.name);
             fs_combo(ui, "wipe_fs", fs);
             notice(
                 ui,
                 icon::WARNING_CIRCLE,
                 theme::DANGER,
-                "Elke sector van de partitie wordt met nullen overschreven (volledig formatteren). Bestanden zijn daarna \
-                 ook met deze app niet meer te herstellen. Dit kan lang duren.",
+                t(
+                    "Elke sector van de partitie wordt met nullen overschreven (volledig formatteren). Bestanden zijn daarna \
+                     ook met deze app niet meer te herstellen. Dit kan lang duren.",
+                    "Every sector of the partition is overwritten with zeros (full format). Files can no longer be \
+                     recovered afterwards, not even with this app. This can take a long time.",
+                ),
             );
             Some(PartOp::Wipe { target: target.clone(), fs: *fs })
         }
         Dialog::Delete { target } => {
-            dialog_title(ui, icon::TRASH, theme::DANGER, "Partitie verwijderen", &target.name);
-            notice(ui, icon::WARNING_CIRCLE, theme::DANGER, "De partitie en alle bestanden erop verdwijnen. De ruimte wordt niet-toegewezen.");
+            dialog_title(ui, icon::TRASH, theme::DANGER, t("Partitie verwijderen", "Delete partition"), &target.name);
+            notice(ui, icon::WARNING_CIRCLE, theme::DANGER, t("De partitie en alle bestanden erop verdwijnen. De ruimte wordt niet-toegewezen.", "The partition and all files on it disappear. The space becomes unallocated."));
             Some(PartOp::Delete { target: target.clone() })
         }
         Dialog::Properties { title, rows } => {
-            dialog_title(ui, icon::INFO, theme::ACCENT, "Eigenschappen", title);
+            dialog_title(ui, icon::INFO, theme::ACCENT, t("Eigenschappen", "Properties"), title);
             egui::Grid::new("partition_properties").striped(true).spacing(vec2(24.0, 6.0)).show(ui, |ui| {
                 for (name, value) in rows.iter() {
                     ui.label(egui::RichText::new(name).color(theme::TEXT_DIM));
@@ -526,7 +538,7 @@ fn draw_dialog(ui: &mut egui::Ui, state: &mut Dialog, guard: &Guard) -> Option<P
 
 fn fs_combo(ui: &mut egui::Ui, id: &str, fs: &mut Fs) {
     ui.horizontal(|ui| {
-        ui.label("Bestandssysteem");
+        ui.label(t("Bestandssysteem", "File system"));
         egui::ComboBox::from_id_salt(id).selected_text(fs.label()).show_ui(ui, |ui| {
             for option in Fs::ALL {
                 ui.selectable_value(fs, option, option.label());
@@ -538,19 +550,19 @@ fn fs_combo(ui: &mut egui::Ui, id: &str, fs: &mut Fs) {
 fn label_edit(ui: &mut egui::Ui, label: &mut String) {
     ui.horizontal(|ui| {
         ui.label("Label");
-        ui.add(egui::TextEdit::singleline(label).desired_width(220.0).hint_text("bijvoorbeeld Gegevens"));
+        ui.add(egui::TextEdit::singleline(label).desired_width(220.0).hint_text(t("bijvoorbeeld Gegevens", "for example Data")));
     });
 }
 
 /// Drive-letter choice from the free letters; `automatic` adds "Automatisch".
 fn letter_combo(ui: &mut egui::Ui, id: &str, letter: &mut Option<char>, guard: &Guard, automatic: bool) {
     let free: Vec<char> = ('D'..='Z').filter(|l| !guard.used_letters.contains(l)).collect();
-    let shown = letter.map_or_else(|| if automatic { "Automatisch".to_string() } else { "Kies…".to_string() }, |l| format!("{l}:"));
+    let shown = letter.map_or_else(|| if automatic { t("Automatisch", "Automatic").to_string() } else { t("Kies…", "Choose…").to_string() }, |l| format!("{l}:"));
     ui.horizontal(|ui| {
-        ui.label("Stationsletter");
+        ui.label(t("Stationsletter", "Drive letter"));
         egui::ComboBox::from_id_salt(id).selected_text(shown).show_ui(ui, |ui| {
             if automatic {
-                ui.selectable_value(letter, None, "Automatisch");
+                ui.selectable_value(letter, None, t("Automatisch", "Automatic"));
             }
             for l in free {
                 ui.selectable_value(letter, Some(l), format!("{l}:"));

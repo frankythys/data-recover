@@ -4,6 +4,7 @@
 //! their boot sector is still on the disk. Nothing is written; a found
 //! partition can be scanned for files like any other.
 
+use crate::i18n::t;
 use crate::imaging::BlockSource;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,14 +39,14 @@ pub enum PartKind {
 impl PartKind {
     pub fn label(self) -> &'static str {
         match self {
-            PartKind::Efi => "EFI-systeempartitie",
-            PartKind::Reserved => "Gereserveerd (Microsoft)",
-            PartKind::Recovery => "Herstelpartitie",
-            PartKind::Data => "Gegevens",
+            PartKind::Efi => t("EFI-systeempartitie", "EFI system partition"),
+            PartKind::Reserved => t("Gereserveerd (Microsoft)", "Reserved (Microsoft)"),
+            PartKind::Recovery => t("Herstelpartitie", "Recovery partition"),
+            PartKind::Data => t("Gegevens", "Data"),
             PartKind::Linux => "Linux",
-            PartKind::LinuxSwap => "Linux-wisselgeheugen",
+            PartKind::LinuxSwap => t("Linux-wisselgeheugen", "Linux swap"),
             PartKind::Apple => "Apple",
-            PartKind::Other => "Overig",
+            PartKind::Other => t("Overig", "Other"),
         }
     }
 
@@ -272,7 +273,7 @@ pub fn search(
         p.done += pos - start;
         while pos + SECTOR <= end {
             if cancel.load(Ordering::Relaxed) {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "Zoeken gestopt"));
+                return Err(io::Error::new(io::ErrorKind::Interrupted, t("Zoeken gestopt", "Search stopped")));
             }
             let len = (end - pos).min(CHUNK) / SECTOR * SECTOR;
             let mut next = pos + len;

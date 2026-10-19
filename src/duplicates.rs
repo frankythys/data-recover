@@ -3,6 +3,8 @@
 //! their first block and only then by a hash of the whole file, so most
 //! files are never read in full. Never modifies anything on disk.
 
+use crate::i18n::t;
+use crate::tf;
 use crate::largefiles::{self, LargeFile};
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
@@ -85,7 +87,7 @@ pub fn scan(
     mut on_progress: impl FnMut(DupProgress),
 ) -> io::Result<DupResult> {
     if !root.is_dir() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, format!("Map niet gevonden: {}", root.display())));
+        return Err(io::Error::new(io::ErrorKind::NotFound, tf!("Map niet gevonden: {}", "Folder not found: {}", root.display())));
     }
     let mut result = DupResult::default();
     let mut progress = DupProgress::default();
@@ -258,7 +260,7 @@ fn split_by_hash(
 }
 
 fn interrupted() -> io::Error {
-    io::Error::new(io::ErrorKind::Interrupted, "Scan gestopt")
+    io::Error::new(io::ErrorKind::Interrupted, t("Scan gestopt", "Scan stopped"))
 }
 
 /// (volume, file index): equal for hard links to the same file.

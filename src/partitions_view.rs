@@ -4,6 +4,8 @@
 //! `partition_ops_view`); the unpartitioned space can be searched for lost
 //! partitions, which can then be scanned for files.
 
+use crate::i18n::t;
+use crate::tf;
 use crate::cleanup::{dialog, dialog_title, dim_background, notice};
 use crate::disk::{self, VolumeInfo};
 use crate::health::{self, DiskHealth};
@@ -121,9 +123,9 @@ impl PartitionsView {
         let Some(job) = &self.search else { return };
         if let Ok(result) = job.rx.try_recv() {
             let result = result.map_err(|e| match e.kind() {
-                io::ErrorKind::PermissionDenied => "Start DiskTools als administrator om de schijf te doorzoeken.".to_string(),
-                io::ErrorKind::Interrupted => "Zoeken gestopt.".to_string(),
-                _ => format!("Zoeken mislukt: {e}"),
+                io::ErrorKind::PermissionDenied => t("Start DiskTools als administrator om de schijf te doorzoeken.", "Start DiskTools as administrator to search the disk.").to_string(),
+                io::ErrorKind::Interrupted => t("Zoeken gestopt.", "Search stopped.").to_string(),
+                _ => tf!("Zoeken mislukt: {e}", "Search failed: {e}"),
             });
             self.found = Some((job.disk, result));
             self.search = None;
@@ -134,7 +136,7 @@ impl PartitionsView {
         let Some(layout) = self.layouts.iter().find(|l| l.index == index) else { return };
         let (size, gaps) = (layout.size, layout.gaps());
         if gaps.is_empty() {
-            self.message = Some("Alle ruimte op deze schijf is ingedeeld, dus er kunnen geen verloren partities zijn.".to_string());
+            self.message = Some(t("Alle ruimte op deze schijf is ingedeeld, dus er kunnen geen verloren partities zijn.", "All space on this disk is partitioned, so there can be no lost partitions.").to_string());
             return;
         }
         let cancel = Arc::new(AtomicBool::new(false));
@@ -184,7 +186,7 @@ impl PartitionsView {
             .frame(theme::card_frame().inner_margin(egui::Margin::same(12.0)))
             .show_inside(ui, |ui| {
                 egui::ScrollArea::vertical().id_salt("partition_ops_scroll").auto_shrink([false, false]).show(ui, |ui| {
-                    section(ui, icon::LIST_BULLETS, "Bewerkingen");
+                    section(ui, icon::LIST_BULLETS, t("Bewerkingen", "Operations"));
                     for item in operations(selected_row, selected_disk, busy, &guard) {
                         if let Some(a) = op_entry(ui, item) {
                             action = Some(a);
@@ -192,10 +194,10 @@ impl PartitionsView {
                     }
                     if self.selected.is_none() {
                         ui.add_space(4.0);
-                        ui.label(egui::RichText::new("Selecteer een partitie in de tabel of de kaart.").size(12.0).color(theme::TEXT_DIM));
+                        ui.label(egui::RichText::new(t("Selecteer een partitie in de tabel of de kaart.", "Select a partition in the table or the map.")).size(12.0).color(theme::TEXT_DIM));
                     }
                     ui.add_space(14.0);
-                    section(ui, icon::HOURGLASS, &format!("Wachtende bewerkingen ({})", self.ops.queued()));
+                    section(ui, icon::HOURGLASS, &tf!("Wachtende bewerkingen ({})", "Pending operations ({})", self.ops.queued()));
                     self.ops.draw_pending(ui);
                 });
             });
@@ -233,11 +235,11 @@ impl PartitionsView {
                     if self.rx.is_some() {
                         ui.add(egui::Spinner::new().size(22.0).color(theme::ACCENT));
                     } else {
-                        ui::empty_card(ui, icon::INFO, "Geen schijven gevonden.");
+                        ui::empty_card(ui, icon::INFO, t("Geen schijven gevonden.", "No disks found."));
                     }
                     return;
                 }
-                egui::ScrollArea::vertical().id_salt("partition_table_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                egui::ScrollArea::both().id_salt("partition_table_scroll").auto_shrink([false, false]).show(ui, |ui| {
                     if let Some(sel) = partition_map::volume_table(ui, &views, self.selected, &mut menu) {
                         clicked = Some(sel);
                     }
@@ -266,7 +268,7 @@ impl PartitionsView {
             Some(Action::Op(request)) => self.ops.open(request, ui.ctx(), &guard),
             Some(Action::Explore(path)) => {
                 if let Err(e) = crate::largefiles::show_in_explorer(&path) {
-                    self.message = Some(format!("Verkenner openen mislukt: {e}"));
+                    self.message = Some(tf!("Verkenner openen mislukt: {e}", "Could not open Explorer: {e}"));
                 }
             }
             Some(Action::Search(disk)) => self.start_search(disk, ui.ctx()),
@@ -285,21 +287,21 @@ impl PartitionsView {
         let queued = self.ops.queued();
         let busy = self.ops.busy();
         ui.horizontal(|ui| {
-            ui.heading("Partities");
+            ui.heading(t("Partities", "Partitions"));
             ui.add_space(16.0);
-            let apply = ui::primary_icon_button(icon::CHECK, &format!("Toepassen ({queued})"));
-            if ui.add_enabled(queued > 0 && !busy, apply).on_hover_text("Alle wachtende bewerkingen uitvoeren").clicked() {
+            let apply = ui::primary_icon_button(icon::CHECK, &tf!("Toepassen ({queued})", "Apply ({queued})"));
+            if ui.add_enabled(queued > 0 && !busy, apply).on_hover_text(t("Alle wachtende bewerkingen uitvoeren", "Carry out all pending operations")).clicked() {
                 pressed = Some(Toolbar::Apply);
             }
-            if ui.add_enabled(queued > 0 && !busy, ui::secondary_icon_button(icon::ARROW_COUNTER_CLOCKWISE, "Ongedaan maken")).clicked() {
+            if ui.add_enabled(queued > 0 && !busy, ui::secondary_icon_button(icon::ARROW_COUNTER_CLOCKWISE, t("Ongedaan maken", "Undo"))).clicked() {
                 pressed = Some(Toolbar::Undo);
             }
-            if ui.add_enabled(queued > 0 && !busy, ui::secondary_icon_button(icon::X, "Alles annuleren")).clicked() {
+            if ui.add_enabled(queued > 0 && !busy, ui::secondary_icon_button(icon::X, t("Alles annuleren", "Cancel all"))).clicked() {
                 pressed = Some(Toolbar::Clear);
             }
             ui.separator();
             let loading = self.rx.is_some();
-            if ui.add_enabled(!loading && !busy, ui::secondary_icon_button(icon::ARROW_CLOCKWISE, "Opnieuw lezen")).clicked() {
+            if ui.add_enabled(!loading && !busy, ui::secondary_icon_button(icon::ARROW_CLOCKWISE, t("Opnieuw lezen", "Reload"))).clicked() {
                 pressed = Some(Toolbar::Reload);
             }
             match &self.search {
@@ -307,17 +309,17 @@ impl PartitionsView {
                     let p = job.progress.lock().unwrap().clone();
                     let pct = (p.done * 100).checked_div(p.total).unwrap_or(0);
                     ui.add(egui::Spinner::new().size(16.0).color(theme::ACCENT));
-                    ui.label(egui::RichText::new(format!("Schijf {} doorzoeken… {pct}% · {} gevonden", job.disk, p.found)).color(theme::TEXT_DIM));
-                    if ui::icon_button(ui, icon::STOP, "Zoeken stoppen").clicked() {
+                    ui.label(egui::RichText::new(tf!("Schijf {} doorzoeken… {pct}% · {} gevonden", "Searching disk {}… {pct}% · {} found", job.disk, p.found)).color(theme::TEXT_DIM));
+                    if ui::icon_button(ui, icon::STOP, t("Zoeken stoppen", "Stop search")).clicked() {
                         pressed = Some(Toolbar::StopSearch);
                     }
                 }
                 None => {
-                    let button = ui::secondary_icon_button(icon::BINOCULARS, "Verloren partities zoeken");
+                    let button = ui::secondary_icon_button(icon::BINOCULARS, t("Verloren partities zoeken", "Find lost partitions"));
                     let resp = ui
                         .add_enabled(disk.is_some() && !busy, button)
-                        .on_hover_text("Doorzoekt de niet-toegewezen ruimte van de geselecteerde schijf naar oude partities. Er wordt niets geschreven.")
-                        .on_disabled_hover_text("Selecteer eerst iets op een schijf");
+                        .on_hover_text(t("Doorzoekt de niet-toegewezen ruimte van de geselecteerde schijf naar oude partities. Er wordt niets geschreven.", "Searches the unallocated space of the selected disk for old partitions. Nothing is written."))
+                        .on_disabled_hover_text(t("Selecteer eerst iets op een schijf", "Select something on a disk first"));
                     if resp.clicked() {
                         pressed = disk.map(Toolbar::Search);
                     }
@@ -337,26 +339,26 @@ impl PartitionsView {
         let mut close = false;
         dim_background(ctx);
         dialog("partition_found", ctx, |ui| {
-            dialog_title(ui, icon::BINOCULARS, theme::ACCENT, "Verloren partities", &format!("Schijf {disk}"));
+            dialog_title(ui, icon::BINOCULARS, theme::ACCENT, t("Verloren partities", "Lost partitions"), &tf!("Schijf {disk}", "Disk {disk}"));
             match result {
                 Err(e) => notice(ui, icon::WARNING_CIRCLE, theme::DANGER, e),
-                Ok(found) if found.is_empty() => notice(ui, icon::INFO, theme::ACCENT, "Geen verloren partities gevonden in de niet-toegewezen ruimte."),
+                Ok(found) if found.is_empty() => notice(ui, icon::INFO, theme::ACCENT, t("Geen verloren partities gevonden in de niet-toegewezen ruimte.", "No lost partitions found in the unallocated space.")),
                 Ok(found) => {
-                    notice(ui, icon::INFO, theme::ACCENT, "Je kunt een gevonden partitie doorzoeken op bestanden. De indeling van de schijf wordt niet aangepast.");
+                    notice(ui, icon::INFO, theme::ACCENT, t("Je kunt een gevonden partitie doorzoeken op bestanden. De indeling van de schijf wordt niet aangepast.", "You can search a found partition for files. The disk layout is not changed."));
                     for f in found {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(format!("{} · {}", f.fs.label(), disk::format_size(f.size))).font(theme::font_medium(13.5)));
-                            let mut detail = format!("begint op {}", disk::format_size(f.start));
+                            let mut detail = tf!("begint op {}", "starts at {}", disk::format_size(f.start));
                             if f.from_backup {
-                                detail.push_str(" · via de reservekopie van de bootsector");
+                                detail.push_str(t(" · via de reservekopie van de bootsector", " · via the backup boot sector"));
                             }
                             ui.label(egui::RichText::new(detail).color(theme::TEXT_DIM));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(ui::primary_icon_button(icon::MAGNIFYING_GLASS, "Bestanden zoeken")).clicked() {
+                                if ui.add(ui::primary_icon_button(icon::MAGNIFYING_GLASS, t("Bestanden zoeken", "Find files"))).clicked() {
                                     event = Some(Event::Scan {
                                         path: format!(r"\\.\PhysicalDrive{disk}"),
                                         start: Some(f.start),
-                                        label: format!("Verloren {}-partitie (schijf {disk})", f.fs.label()),
+                                        label: tf!("Verloren {}-partitie (schijf {disk})", "Lost {} partition (disk {disk})", f.fs.label()),
                                     });
                                 }
                             });
@@ -366,7 +368,7 @@ impl PartitionsView {
             }
             ui.add_space(8.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                close = ui.add(ui::secondary_icon_button(icon::X, "Sluiten").min_size(vec2(120.0, 36.0))).clicked();
+                close = ui.add(ui::secondary_icon_button(icon::X, t("Sluiten", "Close")).min_size(vec2(120.0, 36.0))).clicked();
             });
         });
         if close || event.is_some() || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -420,21 +422,21 @@ fn op_entry(ui: &mut egui::Ui, item: OpItem) -> Option<Action> {
 /// The operations for the selected row, in partition-manager order.
 fn operations(row: Option<&VolRow>, disk: Option<&DiskView>, busy: bool, guard: &Guard) -> Vec<OpItem> {
     let item = |glyph, text, danger, action| OpItem { glyph, text, danger, action };
-    const NOTHING: &str = "Selecteer eerst een partitie";
+    let nothing = t("Selecteer eerst een partitie", "Select a partition first");
     if busy {
-        return vec![item(icon::HOURGLASS, "Bezig met toepassen…", false, Err("Wacht tot de bewerkingen klaar zijn"))];
+        return vec![item(icon::HOURGLASS, t("Bezig met toepassen…", "Applying…"), false, Err(t("Wacht tot de bewerkingen klaar zijn", "Wait until the operations are done")))];
     }
     let (Some(row), Some(disk)) = (row, disk) else {
         return [
-            (icon::ARROWS_OUT_LINE_HORIZONTAL, "Vergroten/verkleinen"),
-            (icon::HASH, "Stationsletter wijzigen"),
-            (icon::TAG, "Label wijzigen"),
-            (icon::STETHOSCOPE, "Controleren"),
-            (icon::ERASER, "Formatteren"),
-            (icon::TRASH, "Verwijderen"),
+            (icon::ARROWS_OUT_LINE_HORIZONTAL, t("Vergroten/verkleinen", "Resize")),
+            (icon::HASH, t("Stationsletter wijzigen", "Change drive letter")),
+            (icon::TAG, t("Label wijzigen", "Change label")),
+            (icon::STETHOSCOPE, t("Controleren", "Check")),
+            (icon::ERASER, t("Formatteren", "Format")),
+            (icon::TRASH, t("Verwijderen", "Delete")),
         ]
         .into_iter()
-        .map(|(g, t)| item(g, t, false, Err(NOTHING)))
+        .map(|(g, text)| item(g, text, false, Err(nothing)))
         .collect();
     };
     let index = disk.layout.index;
@@ -442,26 +444,26 @@ fn operations(row: Option<&VolRow>, disk: Option<&DiskView>, busy: bool, guard: 
     let Some(part) = row.part else {
         let Selection::Free { start, end, .. } = row.sel else { return Vec::new() };
         return vec![
-            item(icon::PLUS, "Nieuwe partitie", false, Ok(Action::Op(Request::Create { disk: index, start, end }))),
-            item(icon::BINOCULARS, "Verloren partities zoeken", false, Ok(Action::Search(index))),
-            item(icon::INFO, "Eigenschappen", false, Ok(properties)),
+            item(icon::PLUS, t("Nieuwe partitie", "New partition"), false, Ok(Action::Op(Request::Create { disk: index, start, end }))),
+            item(icon::BINOCULARS, t("Verloren partities zoeken", "Find lost partitions"), false, Ok(Action::Search(index))),
+            item(icon::INFO, t("Eigenschappen", "Properties"), false, Ok(properties)),
         ];
     };
 
     let target = Target { disk: index, part: part.number, name: row.name.clone() };
     let volume = row.volume;
     let letter = volume.and_then(|v| v.letter.chars().next());
-    const SYSTEM: &str = "Systeempartitie: Windows heeft deze nodig";
-    const NO_LETTER: &str = "Deze partitie heeft geen stationsletter";
-    const WINDOWS_DISK: &str = "Niet op de schijf waar Windows op staat";
+    let system_why = t("Systeempartitie: Windows heeft deze nodig", "System partition: Windows needs it");
+    let no_letter = t("Deze partitie heeft geen stationsletter", "This partition has no drive letter");
+    let windows_disk = t("Niet op de schijf waar Windows op staat", "Not on the disk Windows is on");
     let system = part.kind.is_system();
-    let unless_system = |a: Action| if system { Err(SYSTEM) } else { Ok(a) };
+    let unless_system = |a: Action| if system { Err(system_why) } else { Ok(a) };
     // Same rule as the guard: when the Windows disk is unknown, none may be erased.
     let on_windows_disk = guard.windows_disk.is_none_or(|d| d == index);
-    let erasing = |a: Action| if on_windows_disk { Err(WINDOWS_DISK) } else { unless_system(a) };
+    let erasing = |a: Action| if on_windows_disk { Err(windows_disk) } else { unless_system(a) };
     let with_volume = |a: Action| match volume {
-        _ if system => Err(SYSTEM),
-        None => Err(NO_LETTER),
+        _ if system => Err(system_why),
+        None => Err(no_letter),
         Some(_) => Ok(a),
     };
     let fs = match volume.map(|v| v.filesystem.to_uppercase()).as_deref() {
@@ -470,69 +472,69 @@ fn operations(row: Option<&VolRow>, disk: Option<&DiskView>, busy: bool, guard: 
         _ => Fs::Ntfs,
     };
     let active = if disk.layout.style != Style::Mbr {
-        Err("Alleen bij schijven met MBR")
+        Err(t("Alleen bij schijven met MBR", "Only on disks with MBR"))
     } else if part.logical {
-        Err("Een logische partitie kan niet actief zijn")
+        Err(t("Een logische partitie kan niet actief zijn", "A logical partition cannot be active"))
     } else if part.active {
-        Err("Deze partitie is al actief")
+        Err(t("Deze partitie is al actief", "This partition is already active"))
     } else if on_windows_disk {
-        Err("Op de Windows-schijf kan dit het opstarten breken")
+        Err(t("Op de Windows-schijf kan dit het opstarten breken", "On the Windows disk this can break startup"))
     } else {
         unless_system(Action::Op(Request::SetActive(target.clone())))
     };
     let hide = match letter {
-        Some(_) if system => Err(SYSTEM),
-        Some(l) if guard.windows_letter.is_none_or(|w| w == l) => Err("De Windows-schijf kan niet verborgen worden"),
+        Some(_) if system => Err(system_why),
+        Some(l) if guard.windows_letter.is_none_or(|w| w == l) => Err(t("De Windows-schijf kan niet verborgen worden", "The Windows drive cannot be hidden")),
         Some(l) => Ok(Action::Op(Request::Hide(target.clone(), l))),
         None => unless_system(Action::Op(Request::Show(target.clone()))),
     };
     let scan = match volume {
         Some(v) => Ok(Action::Event(Event::Scan { path: v.scan_path.clone(), start: None, label: v.display_name() })),
-        None if system => Err(SYSTEM),
+        None if system => Err(system_why),
         None => Ok(Action::Event(Event::Scan { path: format!(r"\\.\PhysicalDrive{index}"), start: Some(part.start), label: row.name.clone() })),
     };
     vec![
-        item(icon::ARROWS_OUT_LINE_HORIZONTAL, "Vergroten/verkleinen", false, unless_system(Action::Op(Request::Resize(target.clone(), part.size)))),
-        item(icon::COPY, "Kopiëren naar image", false, with_volume(Action::Event(Event::Image(volume.map(|v| v.letter.clone()).unwrap_or_default())))),
-        item(icon::HASH, "Stationsletter wijzigen", false, unless_system(Action::Op(Request::Letter(target.clone())))),
-        item(icon::TAG, "Label wijzigen", false, with_volume(Action::Op(Request::Label(target.clone(), volume.map(|v| v.label.clone()).unwrap_or_default())))),
-        item(icon::FLAG, "Actief maken", false, active),
-        item(icon::STETHOSCOPE, "Controleren", false, with_volume(Action::Op(Request::Check(target.clone(), letter.unwrap_or('C'))))),
-        item(icon::LIGHTNING, "Defragmenteren / optimaliseren", false, with_volume(Action::Op(Request::Optimize(target.clone(), letter.unwrap_or('C'))))),
-        item(if letter.is_some() { icon::EYE_SLASH } else { icon::EYE }, if letter.is_some() { "Verbergen" } else { "Zichtbaar maken" }, false, hide),
-        item(icon::TRASH, "Verwijderen", true, erasing(Action::Op(Request::Delete(target.clone())))),
-        item(icon::ERASER, "Formatteren", true, erasing(Action::Op(Request::Format(target.clone())))),
-        item(icon::BROOM, "Partitie wissen", true, erasing(Action::Op(Request::Wipe(target, fs)))),
-        item(icon::PULSE, "Oppervlaktetest", false, Ok(Action::Event(Event::Surface(index)))),
-        item(icon::FOLDER_OPEN, "Verkennen", false, with_volume(Action::Explore(PathBuf::from(format!("{}\\", volume.map(|v| v.letter.as_str()).unwrap_or("")))))),
-        item(icon::MAGNIFYING_GLASS, "Verwijderde bestanden zoeken", false, scan),
-        item(icon::INFO, "Eigenschappen", false, Ok(properties)),
+        item(icon::ARROWS_OUT_LINE_HORIZONTAL, t("Vergroten/verkleinen", "Resize"), false, unless_system(Action::Op(Request::Resize(target.clone(), part.size)))),
+        item(icon::COPY, t("Kopiëren naar image", "Copy to image"), false, with_volume(Action::Event(Event::Image(volume.map(|v| v.letter.clone()).unwrap_or_default())))),
+        item(icon::HASH, t("Stationsletter wijzigen", "Change drive letter"), false, unless_system(Action::Op(Request::Letter(target.clone())))),
+        item(icon::TAG, t("Label wijzigen", "Change label"), false, with_volume(Action::Op(Request::Label(target.clone(), volume.map(|v| v.label.clone()).unwrap_or_default())))),
+        item(icon::FLAG, t("Actief maken", "Mark active"), false, active),
+        item(icon::STETHOSCOPE, t("Controleren", "Check"), false, with_volume(Action::Op(Request::Check(target.clone(), letter.unwrap_or('C'))))),
+        item(icon::LIGHTNING, t("Defragmenteren / optimaliseren", "Defragment / optimize"), false, with_volume(Action::Op(Request::Optimize(target.clone(), letter.unwrap_or('C'))))),
+        item(if letter.is_some() { icon::EYE_SLASH } else { icon::EYE }, if letter.is_some() { t("Verbergen", "Hide") } else { t("Zichtbaar maken", "Show") }, false, hide),
+        item(icon::TRASH, t("Verwijderen", "Delete"), true, erasing(Action::Op(Request::Delete(target.clone())))),
+        item(icon::ERASER, t("Formatteren", "Format"), true, erasing(Action::Op(Request::Format(target.clone())))),
+        item(icon::BROOM, t("Partitie wissen", "Wipe partition"), true, erasing(Action::Op(Request::Wipe(target, fs)))),
+        item(icon::PULSE, t("Oppervlaktetest", "Surface test"), false, Ok(Action::Event(Event::Surface(index)))),
+        item(icon::FOLDER_OPEN, t("Verkennen", "Explore"), false, with_volume(Action::Explore(PathBuf::from(format!("{}\\", volume.map(|v| v.letter.as_str()).unwrap_or("")))))),
+        item(icon::MAGNIFYING_GLASS, t("Verwijderde bestanden zoeken", "Find deleted files"), false, scan),
+        item(icon::INFO, t("Eigenschappen", "Properties"), false, Ok(properties)),
     ]
 }
 
 fn properties(row: &VolRow, disk: &DiskView) -> Vec<(String, String)> {
     let bytes = |n: u64| format!("{} ({} bytes)", disk::format_size(n), ui::fmt_thousands(n));
-    let mut rows = vec![("Schijf".to_string(), format!("Schijf {} · {} · {}", disk.layout.index, disk.model, disk.style))];
+    let mut rows = vec![(t("Schijf", "Disk").to_string(), tf!("Schijf {} · {} · {}", "Disk {} · {} · {}", disk.layout.index, disk.model, disk.style))];
     let (start, end) = match row.sel {
         Selection::Free { start, end, .. } => (start, end),
         Selection::Part { .. } => row.part.map_or((0, 0), |p| (p.start, p.start + p.size)),
     };
     if let Some(p) = row.part {
-        rows.push(("Partitienummer".to_string(), p.number.to_string()));
-        rows.push(("Soort".to_string(), p.kind.label().to_string()));
+        rows.push((t("Partitienummer", "Partition number").to_string(), p.number.to_string()));
+        rows.push((t("Soort", "Kind").to_string(), p.kind.label().to_string()));
         rows.push(("Type".to_string(), row.kind.to_string()));
         if !p.name.is_empty() {
-            rows.push(("GPT-naam".to_string(), p.name.clone()));
+            rows.push((t("GPT-naam", "GPT name").to_string(), p.name.clone()));
         }
     }
-    rows.push(("Begin".to_string(), bytes(start)));
-    rows.push(("Grootte".to_string(), bytes(end - start)));
+    rows.push((t("Begin", "Start").to_string(), bytes(start)));
+    rows.push((t("Grootte", "Size").to_string(), bytes(end - start)));
     if let Some(v) = row.volume {
-        rows.push(("Stationsletter".to_string(), v.letter.clone()));
+        rows.push((t("Stationsletter", "Drive letter").to_string(), v.letter.clone()));
         rows.push(("Label".to_string(), if v.label.is_empty() { "—".to_string() } else { v.label.clone() }));
-        rows.push(("Bestandssysteem".to_string(), v.filesystem.clone()));
-        rows.push(("Gebruikt".to_string(), bytes(v.used_bytes)));
-        rows.push(("Vrij".to_string(), bytes(v.total_bytes.saturating_sub(v.used_bytes))));
+        rows.push((t("Bestandssysteem", "File system").to_string(), v.filesystem.clone()));
+        rows.push((t("Gebruikt", "Used").to_string(), bytes(v.used_bytes)));
+        rows.push((t("Vrij", "Free").to_string(), bytes(v.total_bytes.saturating_sub(v.used_bytes))));
     }
     rows.push(("Status".to_string(), row.status.clone()));
     rows
@@ -573,13 +575,13 @@ fn disk_views<'a>(layouts: &'a [Layout], disks: &HashMap<u32, DiskHealth>, volum
                     let is_windows = volume.is_some() && volume.map(|v| &v.letter) == windows.map(|w| &w.letter);
                     let mut flags = Vec::new();
                     if p.active {
-                        flags.push("Actief");
+                        flags.push(t("Actief", "Active"));
                     }
                     if p.kind == partitions::PartKind::Efi || (p.active && layout.style == Style::Mbr) {
-                        flags.push("Systeem");
+                        flags.push(t("Systeem", "System"));
                     }
                     if is_windows {
-                        flags.push("Opstart");
+                        flags.push(t("Opstart", "Boot"));
                     }
                     let status = if flags.is_empty() { health_text.to_string() } else { format!("{health_text} ({})", flags.join(", ")) };
                     // GPT names are mostly generic ("Basic data partition"), so
@@ -595,8 +597,8 @@ fn disk_views<'a>(layouts: &'a [Layout], disks: &HashMap<u32, DiskHealth>, volum
                         used: volume.map(|v| v.used_bytes),
                         kind: match (layout.style, p.logical) {
                             (Style::Gpt, _) => "GPT",
-                            (_, true) => "Logisch",
-                            _ => "Primair",
+                            (_, true) => t("Logisch", "Logical"),
+                            _ => t("Primair", "Primary"),
                         },
                         status,
                         windows: is_windows,
@@ -607,11 +609,11 @@ fn disk_views<'a>(layouts: &'a [Layout], disks: &HashMap<u32, DiskHealth>, volum
                 sel: Selection::Free { disk: layout.index, start, end },
                 part: None,
                 volume: None,
-                name: "Niet-toegewezen".to_string(),
+                name: t("Niet-toegewezen", "Unallocated").to_string(),
                 fs: "—".to_string(),
                 size: end - start,
                 used: None,
-                kind: "Niet-toegewezen",
+                kind: t("Niet-toegewezen", "Unallocated"),
                 status: "—".to_string(),
                 windows: false,
             }));
@@ -621,11 +623,11 @@ fn disk_views<'a>(layouts: &'a [Layout], disks: &HashMap<u32, DiskHealth>, volum
             });
             DiskView {
                 layout,
-                model: disks.get(&layout.index).map_or_else(|| "Onbekende schijf".to_string(), |d| d.model.clone()),
+                model: disks.get(&layout.index).map_or_else(|| t("Onbekende schijf", "Unknown disk").to_string(), |d| d.model.clone()),
                 style: match layout.style {
-                    Style::Gpt => "Basis GPT",
-                    Style::Mbr => "Basis MBR",
-                    Style::Raw => "Geen partitietabel",
+                    Style::Gpt => t("Basis GPT", "Basic GPT"),
+                    Style::Mbr => t("Basis MBR", "Basic MBR"),
+                    Style::Raw => t("Geen partitietabel", "No partition table"),
                 },
                 health,
                 rows,

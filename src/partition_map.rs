@@ -3,6 +3,8 @@
 //! show them. Both report what was clicked; right-clicking opens a menu
 //! drawn by the caller.
 
+use crate::i18n::t;
+use crate::tf;
 use crate::disk::{self, VolumeInfo};
 use crate::health::Status;
 use crate::partition_ops_view::Selection;
@@ -12,12 +14,21 @@ use egui::{Color32, Rect, Sense, Stroke, pos2, vec2};
 use egui_phosphor::regular as icon;
 
 const TABLE_ROW_H: f32 = 26.0;
+const NAME_MIN_W: f32 = 190.0;
 const MAP_ROW_H: f32 = 80.0;
 const DISK_BOX_W: f32 = 132.0;
 const BLOCK_MIN_W: f32 = 118.0;
 const BLOCK_GAP: f32 = 6.0;
 /// Right-hand table columns: (title, width).
-const COLUMNS: [(&str, f32); 5] = [("Capaciteit", 100.0), ("Vrije ruimte", 100.0), ("Bestandssysteem", 135.0), ("Type", 95.0), ("Status", 230.0)];
+fn columns() -> [(&'static str, f32); 5] {
+    [
+        (t("Capaciteit", "Capacity"), 100.0),
+        (t("Vrije ruimte", "Free space"), 100.0),
+        (t("Bestandssysteem", "File system"), 135.0),
+        ("Type", 95.0),
+        ("Status", 230.0),
+    ]
+}
 
 const PRIMARY: Color32 = Color32::from_rgb(76, 175, 80);
 const LOGICAL: Color32 = Color32::from_rgb(214, 158, 46);
@@ -79,10 +90,10 @@ impl DiskView<'_> {
 
 pub fn health_text(health: Option<Status>) -> &'static str {
     match health {
-        Some(Status::Good) => "Gezond",
-        Some(Status::Caution) => "Let op",
-        Some(Status::Bad) => "Slecht",
-        None => "Onbekend",
+        Some(Status::Good) => t("Gezond", "Healthy"),
+        Some(Status::Caution) => t("Let op", "Caution"),
+        Some(Status::Bad) => t("Slecht", "Bad"),
+        None => t("Onbekend", "Unknown"),
     }
 }
 
@@ -110,15 +121,19 @@ pub fn volume_table(
     selected: Option<Selection>,
     menu: &mut dyn FnMut(&mut egui::Ui, &VolRow),
 ) -> Option<Selection> {
-    let width = ui.available_width() - 8.0;
-    let name_w = (width - COLUMNS.iter().map(|c| c.1).sum::<f32>()).max(160.0);
+    // Columns keep a readable width; in a narrow window the table scrolls
+    // sideways instead (the caller puts it in a horizontal scroll area).
+    let columns = columns();
+    let fixed: f32 = columns.iter().map(|c| c.1).sum();
+    let width = (ui.available_width() - 8.0).max(NAME_MIN_W + fixed);
+    let name_w = width - fixed;
     let mut clicked = None;
 
     // Header.
     let (rect, _) = ui.allocate_exact_size(vec2(width, TABLE_ROW_H), Sense::hover());
     ui.painter().rect_filled(rect, 0.0, theme::SUBTLE_BG);
     let mut x = rect.left() + 8.0;
-    for (title, w) in std::iter::once(("Volume", name_w)).chain(COLUMNS) {
+    for (title, w) in std::iter::once((t("Volume", "Volume"), name_w)).chain(columns) {
         cell(ui, rect, x, w, title, theme::font_semibold(12.5), theme::TEXT_DIM);
         x += w;
     }
@@ -126,7 +141,7 @@ pub fn volume_table(
     for d in disks {
         let (rect, _) = ui.allocate_exact_size(vec2(width, TABLE_ROW_H + 2.0), Sense::hover());
         ui.painter().text(pos2(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, icon::HARD_DRIVE, theme::icon(15.0), theme::TEXT_DIM);
-        let title = format!("Schijf {} ({}, {}) · {}", d.layout.index, d.style, d.health_text(), d.model);
+        let title = tf!("Schijf {} ({}, {}) · {}", "Disk {} ({}, {}) · {}", d.layout.index, d.style, d.health_text(), d.model);
         cell(ui, rect, rect.left() + 30.0, width - 40.0, &title, theme::font_semibold(13.0), theme::TEXT_MAIN);
 
         for row in &d.rows {
@@ -150,7 +165,7 @@ pub fn volume_table(
             let color = if row.is_free() { theme::TEXT_DIM } else { theme::TEXT_MAIN };
             cell(ui, rect, rect.left() + 44.0, name_w - 36.0, &row.name, theme::font_medium(13.0), color);
             let mut x = rect.left() + 8.0 + name_w;
-            for ((_, w), value) in COLUMNS.iter().zip(values) {
+            for ((_, w), value) in columns.iter().zip(values) {
                 cell(ui, rect, x, *w, &value, theme::font(13.0), color);
                 x += w;
             }
@@ -190,7 +205,7 @@ pub fn disk_map(
         ui.painter().rect_stroke(disk_box, 6.0, Stroke::new(1.0_f32, theme::CARD_BORDER));
         let p = ui.painter();
         p.text(disk_box.min + vec2(10.0, 16.0), egui::Align2::LEFT_CENTER, icon::HARD_DRIVE, theme::icon(18.0), theme::ACCENT);
-        p.text(disk_box.min + vec2(34.0, 16.0), egui::Align2::LEFT_CENTER, format!("Schijf {}", d.layout.index), theme::font_semibold(13.5), theme::TEXT_MAIN);
+        p.text(disk_box.min + vec2(34.0, 16.0), egui::Align2::LEFT_CENTER, tf!("Schijf {}", "Disk {}", d.layout.index), theme::font_semibold(13.5), theme::TEXT_MAIN);
         p.text(disk_box.min + vec2(10.0, 38.0), egui::Align2::LEFT_CENTER, d.style, theme::font(12.0), theme::TEXT_DIM);
         p.text(disk_box.min + vec2(10.0, 54.0), egui::Align2::LEFT_CENTER, disk::format_size(d.layout.size), theme::font(12.0), theme::TEXT_DIM);
 
@@ -267,7 +282,7 @@ fn draw_block(ui: &egui::Ui, rect: Rect, row: &VolRow, selected: bool, hovered: 
 /// Colour key under the map.
 pub fn legend(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        for (color, text) in [(PRIMARY, "Primair / GPT"), (LOGICAL, "Logisch"), (SYSTEM, "Systeem"), (theme::TRACK_BG, "Niet-toegewezen")] {
+        for (color, text) in [(PRIMARY, t("Primair / GPT", "Primary / GPT")), (LOGICAL, t("Logisch", "Logical")), (SYSTEM, t("Systeem", "System")), (theme::TRACK_BG, t("Niet-toegewezen", "Unallocated"))] {
             let (dot, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
             ui.painter().rect_filled(dot, 2.0, color);
             ui.label(egui::RichText::new(text).size(12.5).color(theme::TEXT_DIM));

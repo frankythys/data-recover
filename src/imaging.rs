@@ -3,6 +3,7 @@
 //! failing. Like ddrescue, unreadable sectors are filled with zeros and
 //! counted instead of stopping the copy. The source is only ever read.
 
+use crate::i18n::t;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -35,7 +36,7 @@ impl BlockSource for File {
         let mut filled = 0;
         while filled < len {
             match self.read(&mut buf[filled..])? {
-                0 => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "einde van de schijf")),
+                0 => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, t("einde van de schijf", "end of the disk"))),
                 n => filled += n,
             }
         }
@@ -165,7 +166,7 @@ impl ImageJob {
             self.finished_after = Some(self.started_at.elapsed());
             self.result = Some(result.map_err(|e| {
                 if e.kind() == io::ErrorKind::PermissionDenied {
-                    "Toegang geweigerd. Start DiskTools als administrator.".to_string()
+                    t("Toegang geweigerd. Start DiskTools als administrator.", "Access denied. Start DiskTools as administrator.").to_string()
                 } else {
                     e.to_string()
                 }

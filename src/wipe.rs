@@ -8,6 +8,7 @@
 //! One pass of zeros is enough for current disks. On SSDs wear levelling can
 //! keep old copies out of reach; there TRIM usually clears deleted blocks.
 
+use crate::i18n::t;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -49,7 +50,7 @@ fn fill(
     for block in [BLOCK, ALIGN] {
         loop {
             if cancel.load(Ordering::Relaxed) {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "Wissen gestopt"));
+                return Err(io::Error::new(io::ErrorKind::Interrupted, t("Wissen gestopt", "Wipe stopped")));
             }
             if limit.is_some_and(|l| p.written + block as u64 > l) {
                 break;
@@ -120,7 +121,7 @@ fn wipe_free_space_up_to(
 /// and program files.
 pub fn shred(path: &Path) -> io::Result<u64> {
     if crate::largefiles::is_system_or_app(path) {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "systeem- of programmabestand, niet gewist"));
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, t("systeem- of programmabestand, niet gewist", "system or program file, not wiped")));
     }
     let len = overwrite(path)?;
     // A new name hides the old one in the folder's records.

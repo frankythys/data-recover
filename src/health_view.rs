@@ -1,6 +1,8 @@
 //! "Schijfgezondheid" screen: one card per physical disk with its SMART
 //! verdict, the key values and, on request, every SMART value.
 
+use crate::i18n::t;
+use crate::tf;
 use crate::cleanup::notice;
 use crate::disk::{self, VolumeInfo};
 use crate::health::{self, Bus, DiskHealth, Smart, Status};
@@ -45,15 +47,15 @@ impl HealthView {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
-                ui.heading("Schijfgezondheid");
+                ui.heading(t("Schijfgezondheid", "Disk health"));
                 ui.label(
-                    egui::RichText::new("Wat je schijven zelf bijhouden over hun temperatuur, slijtage en fouten (SMART).")
+                    egui::RichText::new(t("Wat je schijven zelf bijhouden over hun temperatuur, slijtage en fouten (SMART).", "What your disks record about their temperature, wear and errors (SMART)."))
                         .color(theme::TEXT_DIM),
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 ui.add_enabled_ui(!loading, |ui| {
-                    refresh = ui::icon_button(ui, icon::ARROW_CLOCKWISE, "Opnieuw lezen").clicked();
+                    refresh = ui::icon_button(ui, icon::ARROW_CLOCKWISE, t("Opnieuw lezen", "Read again")).clicked();
                 });
                 if loading {
                     ui.add(egui::Spinner::new().size(20.0).color(theme::ACCENT));
@@ -70,13 +72,16 @@ impl HealthView {
                 ui,
                 icon::SHIELD_WARNING,
                 theme::ACCENT,
-                "Start DiskTools als administrator om alle gezondheidsgegevens te lezen.",
+                t(
+                    "Start DiskTools als administrator om alle gezondheidsgegevens te lezen.",
+                    "Start DiskTools as administrator to read all health data.",
+                ),
             );
             ui.add_space(10.0);
         }
         if self.disks.is_empty() {
             if !loading {
-                ui::empty_card(ui, icon::INFO, "Geen schijven gevonden.");
+                ui::empty_card(ui, icon::INFO, t("Geen schijven gevonden.", "No disks found."));
             }
             return;
         }
@@ -91,10 +96,10 @@ impl HealthView {
 
 fn status_style(status: Option<Status>) -> (&'static str, &'static str, egui::Color32) {
     match status {
-        Some(Status::Good) => ("Goed", icon::CHECK_CIRCLE, theme::SUCCESS),
-        Some(Status::Caution) => ("Let op", icon::WARNING, theme::WARNING),
-        Some(Status::Bad) => ("Slecht", icon::X_CIRCLE, theme::DANGER),
-        None => ("Onbekend", icon::QUESTION, theme::TEXT_FAINT),
+        Some(Status::Good) => (t("Goed", "Good"), icon::CHECK_CIRCLE, theme::SUCCESS),
+        Some(Status::Caution) => (t("Let op", "Caution"), icon::WARNING, theme::WARNING),
+        Some(Status::Bad) => (t("Slecht", "Bad"), icon::X_CIRCLE, theme::DANGER),
+        None => (t("Onbekend", "Unknown"), icon::QUESTION, theme::TEXT_FAINT),
     }
 }
 
@@ -102,12 +107,12 @@ fn kind_label(d: &DiskHealth) -> &'static str {
     match (d.bus, d.ssd) {
         (Bus::Nvme, _) => "NVMe-SSD",
         (Bus::Sata, Some(true)) => "SATA-SSD",
-        (Bus::Sata, Some(false)) => "Harde schijf (SATA)",
-        (Bus::Sata, None) => "SATA-schijf",
-        (Bus::Usb, _) => "USB-schijf",
-        (Bus::Sd, _) => "Geheugenkaart",
+        (Bus::Sata, Some(false)) => t("Harde schijf (SATA)", "Hard disk (SATA)"),
+        (Bus::Sata, None) => t("SATA-schijf", "SATA disk"),
+        (Bus::Usb, _) => t("USB-schijf", "USB drive"),
+        (Bus::Sd, _) => t("Geheugenkaart", "Memory card"),
         (Bus::Other, Some(true)) => "SSD",
-        (Bus::Other, _) => "Schijf",
+        (Bus::Other, _) => t("Schijf", "Disk"),
     }
 }
 
@@ -115,7 +120,7 @@ fn disk_card(ui: &mut egui::Ui, d: &DiskHealth, volumes: &[VolumeInfo]) {
     let s = d.summary();
     let (label, glyph, color) = status_style(s.status);
     let letters: Vec<&str> = volumes.iter().filter(|v| v.disk_index == Some(d.index)).map(|v| v.letter.as_str()).collect();
-    let mut sub = format!("{} · {} · Schijf {}", kind_label(d), disk::format_size(d.size), d.index);
+    let mut sub = tf!("{} · {} · Schijf {}", "{} · {} · Disk {}", kind_label(d), disk::format_size(d.size), d.index);
     if !letters.is_empty() {
         sub.push_str(&format!(" · {}", letters.join(", ")));
     }
@@ -129,7 +134,7 @@ fn disk_card(ui: &mut egui::Ui, d: &DiskHealth, volumes: &[VolumeInfo]) {
             ui.add_space(4.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 3.0;
-                let model = if d.model.is_empty() { "Onbekende schijf" } else { &d.model };
+                let model = if d.model.is_empty() { t("Onbekende schijf", "Unknown disk") } else { &d.model };
                 ui.label(egui::RichText::new(model).font(theme::font_semibold(16.0)));
                 ui.label(egui::RichText::new(&sub).color(theme::TEXT_DIM));
             });
@@ -151,34 +156,34 @@ fn disk_card(ui: &mut egui::Ui, d: &DiskHealth, volumes: &[VolumeInfo]) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
             if let Some(t) = s.temperature {
-                metric(ui, icon::THERMOMETER, "Temperatuur", &format!("{t} °C"));
+                metric(ui, icon::THERMOMETER, crate::i18n::t("Temperatuur", "Temperature"), &format!("{t} °C"));
             }
             if let Some(l) = s.life_left {
-                metric(ui, icon::BATTERY_HIGH, "Levensduur", &format!("{l}%"));
+                metric(ui, icon::BATTERY_HIGH, t("Levensduur", "Life left"), &format!("{l}%"));
             }
             if let Some(h) = s.power_on_hours {
-                metric(ui, icon::CLOCK, "In gebruik", &format!("{} uur", ui::fmt_thousands(h)));
+                metric(ui, icon::CLOCK, t("In gebruik", "Powered on"), &tf!("{} uur", "{} hours", ui::fmt_thousands(h)));
             }
             if let Some(n) = s.power_cycles {
-                metric(ui, icon::POWER, "Aangezet", &format!("{} keer", ui::fmt_thousands(n)));
+                metric(ui, icon::POWER, t("Aangezet", "Power cycles"), &tf!("{} keer", "{} times", ui::fmt_thousands(n)));
             }
             if let Some(b) = s.bytes_read {
-                metric(ui, icon::DOWNLOAD, "Gelezen", &disk::format_size(b));
+                metric(ui, icon::DOWNLOAD, t("Gelezen", "Read"), &disk::format_size(b));
             }
             if let Some(b) = s.bytes_written {
-                metric(ui, icon::UPLOAD, "Geschreven", &disk::format_size(b));
+                metric(ui, icon::UPLOAD, t("Geschreven", "Written"), &disk::format_size(b));
             }
         });
 
         match &d.smart {
             Smart::NeedsAdmin => {
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("SMART niet gelezen: hiervoor zijn administratorrechten nodig.").color(theme::TEXT_DIM));
+                ui.label(egui::RichText::new(t("SMART niet gelezen: hiervoor zijn administratorrechten nodig.", "SMART not read: this needs administrator rights.")).color(theme::TEXT_DIM));
             }
             Smart::Unavailable => {
                 ui.add_space(8.0);
                 ui.label(
-                    egui::RichText::new("Deze schijf geeft geen SMART-gegevens door. Bij USB-schijven en geheugenkaarten is dat normaal.")
+                    egui::RichText::new(t("Deze schijf geeft geen SMART-gegevens door. Bij USB-schijven en geheugenkaarten is dat normaal.", "This disk does not report SMART data. That is normal for USB drives and memory cards."))
                         .color(theme::TEXT_DIM),
                 );
             }
@@ -187,7 +192,7 @@ fn disk_card(ui: &mut egui::Ui, d: &DiskHealth, volumes: &[VolumeInfo]) {
                 if s.issues.is_empty() {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(icon::CHECK).font(theme::icon(14.0)).color(theme::SUCCESS));
-                        ui.label(egui::RichText::new("Geen problemen gevonden.").color(theme::SUCCESS));
+                        ui.label(egui::RichText::new(t("Geen problemen gevonden.", "No problems found.")).color(theme::SUCCESS));
                     });
                 }
                 for (status, text) in &s.issues {
@@ -195,7 +200,7 @@ fn disk_card(ui: &mut egui::Ui, d: &DiskHealth, volumes: &[VolumeInfo]) {
                     notice(ui, glyph, color, text);
                 }
                 ui.add_space(4.0);
-                egui::CollapsingHeader::new(egui::RichText::new("Alle SMART-waarden").color(theme::TEXT_DIM))
+                egui::CollapsingHeader::new(egui::RichText::new(t("Alle SMART-waarden", "All SMART values")).color(theme::TEXT_DIM))
                     .id_salt(("smart_values", d.index))
                     .show(ui, |ui| smart_table(ui, d));
             }
@@ -205,21 +210,26 @@ fn disk_card(ui: &mut egui::Ui, d: &DiskHealth, volumes: &[VolumeInfo]) {
 
 /// Small tile with an icon, a caption and a value.
 fn metric(ui: &mut egui::Ui, glyph: &str, caption: &str, value: &str) {
-    egui::Frame::none()
-        .fill(theme::SUBTLE_BG)
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-        .show(ui, |ui| {
-            ui.set_width(130.0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(glyph).font(theme::icon(18.0)).color(theme::TEXT_DIM));
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(egui::RichText::new(caption).size(11.5).color(theme::TEXT_DIM));
-                    ui.label(egui::RichText::new(value).font(theme::font_semibold(15.0)));
+    // A known size up front lets the row wrap; a bare frame only knows its
+    // size after it is drawn.
+    const SIZE: egui::Vec2 = egui::vec2(154.0, 50.0);
+    ui.allocate_ui(SIZE, |ui| {
+        egui::Frame::none()
+            .fill(theme::SUBTLE_BG)
+            .rounding(egui::Rounding::same(8.0))
+            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+            .show(ui, |ui| {
+                ui.set_width(SIZE.x - 24.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(glyph).font(theme::icon(18.0)).color(theme::TEXT_DIM));
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.label(egui::RichText::new(caption).size(11.5).color(theme::TEXT_DIM));
+                        ui.label(egui::RichText::new(value).font(theme::font_semibold(15.0)));
+                    });
                 });
             });
-        });
+    });
 }
 
 fn smart_table(ui: &mut egui::Ui, d: &DiskHealth) {
@@ -229,18 +239,18 @@ fn smart_table(ui: &mut egui::Ui, d: &DiskHealth) {
     match &d.smart {
         Smart::Nvme(log) => {
             let rows = [
-                ("Kritieke waarschuwing", if log.critical_warning == 0 { "Geen".to_string() } else { format!("0x{:02X}", log.critical_warning) }),
-                ("Temperatuur", format!("{} °C", i32::from(log.temperature_kelvin) - 273)),
-                ("Reserve beschikbaar", format!("{}%", log.available_spare)),
-                ("Grens reserve", format!("{}%", log.spare_threshold)),
-                ("Levensduur gebruikt", format!("{}%", log.percentage_used)),
-                ("Gelezen", disk::format_size(log.data_units_read.saturating_mul(512_000))),
-                ("Geschreven", disk::format_size(log.data_units_written.saturating_mul(512_000))),
-                ("Aantal keer aangezet", ui::fmt_thousands(log.power_cycles)),
-                ("Uren in gebruik", ui::fmt_thousands(log.power_on_hours)),
-                ("Onveilig uitgeschakeld", ui::fmt_thousands(log.unsafe_shutdowns)),
-                ("Lees- en schrijffouten", ui::fmt_thousands(log.media_errors)),
-                ("Foutmeldingen in logboek", ui::fmt_thousands(log.error_log_entries)),
+                (t("Kritieke waarschuwing", "Critical warning"), if log.critical_warning == 0 { t("Geen", "None").to_string() } else { format!("0x{:02X}", log.critical_warning) }),
+                (t("Temperatuur", "Temperature"), format!("{} °C", i32::from(log.temperature_kelvin) - 273)),
+                (t("Reserve beschikbaar", "Available spare"), format!("{}%", log.available_spare)),
+                (t("Grens reserve", "Spare threshold"), format!("{}%", log.spare_threshold)),
+                (t("Levensduur gebruikt", "Percentage used"), format!("{}%", log.percentage_used)),
+                (t("Gelezen", "Data read"), disk::format_size(log.data_units_read.saturating_mul(512_000))),
+                (t("Geschreven", "Data written"), disk::format_size(log.data_units_written.saturating_mul(512_000))),
+                (t("Aantal keer aangezet", "Power cycles"), ui::fmt_thousands(log.power_cycles)),
+                (t("Uren in gebruik", "Power-on hours"), ui::fmt_thousands(log.power_on_hours)),
+                (t("Onveilig uitgeschakeld", "Unsafe shutdowns"), ui::fmt_thousands(log.unsafe_shutdowns)),
+                (t("Lees- en schrijffouten", "Media errors"), ui::fmt_thousands(log.media_errors)),
+                (t("Foutmeldingen in logboek", "Error log entries"), ui::fmt_thousands(log.error_log_entries)),
             ];
             egui::Grid::new(("nvme_grid", d.index)).striped(true).spacing(vec2(24.0, 6.0)).show(ui, |ui| {
                 for (name, value) in rows {
@@ -252,7 +262,7 @@ fn smart_table(ui: &mut egui::Ui, d: &DiskHealth) {
         }
         Smart::Ata(attrs) => {
             egui::Grid::new(("ata_grid", d.index)).striped(true).spacing(vec2(18.0, 6.0)).show(ui, |ui| {
-                for head in ["ID", "Naam", "Huidig", "Slechtst", "Grens", "Ruwe waarde"] {
+                for head in ["ID", t("Naam", "Name"), t("Huidig", "Current"), t("Slechtst", "Worst"), t("Grens", "Threshold"), t("Ruwe waarde", "Raw value")] {
                     ui.label(egui::RichText::new(head).size(12.0).font(theme::font_semibold(12.0)).color(theme::TEXT_DIM));
                 }
                 ui.end_row();
@@ -280,7 +290,7 @@ pub(crate) fn disk_chips(ui: &mut egui::Ui, disks: &[DiskHealth], selected: Opti
         ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
         for d in disks {
             let glyph = if d.bus == Bus::Usb { icon::USB } else { icon::HARD_DRIVE };
-            let sub = format!("{} · {} · Schijf {}", kind_label(d), disk::format_size(d.size), d.index);
+            let sub = tf!("{} · {} · Schijf {}", "{} · {} · Disk {}", kind_label(d), disk::format_size(d.size), d.index);
             if crate::cleanup::location_chip(ui, glyph, &d.model, &sub, selected == Some(d.index)) {
                 picked = Some(d.index);
             }

@@ -1,6 +1,7 @@
 //! "Systeem opschonen": caches and temporary files that programs recreate on
 //! their own, so they are safe to remove. Files that are in use are skipped.
 
+use crate::i18n::t;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -29,23 +30,23 @@ pub const ALL: [Kind; 6] = [
 impl Kind {
     pub fn title(self) -> &'static str {
         match self {
-            Kind::UserTemp => "Tijdelijke bestanden",
-            Kind::WindowsTemp => "Tijdelijke Windows-bestanden",
-            Kind::BrowserCache => "Browsercache",
-            Kind::UpdateCache => "Windows Update-downloads",
-            Kind::CrashDumps => "Crashdumps en foutrapporten",
-            Kind::RecycleBin => "Prullenbak",
+            Kind::UserTemp => t("Tijdelijke bestanden", "Temporary files"),
+            Kind::WindowsTemp => t("Tijdelijke Windows-bestanden", "Temporary Windows files"),
+            Kind::BrowserCache => t("Browsercache", "Browser cache"),
+            Kind::UpdateCache => t("Windows Update-downloads", "Windows Update downloads"),
+            Kind::CrashDumps => t("Crashdumps en foutrapporten", "Crash dumps and error reports"),
+            Kind::RecycleBin => t("Prullenbak", "Recycle Bin"),
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
-            Kind::UserTemp => "Restanten van installaties en programma's (ouder dan 24 uur)",
-            Kind::WindowsTemp => "Tijdelijke bestanden van Windows zelf (ouder dan 24 uur)",
-            Kind::BrowserCache => "Opgeslagen webpagina's van Chrome, Edge, Brave en Firefox",
-            Kind::UpdateCache => "Al geïnstalleerde updates die nog op schijf staan",
-            Kind::CrashDumps => "Geheugendumps en rapporten van vastgelopen programma's",
-            Kind::RecycleBin => "Bestanden die je eerder hebt verwijderd",
+            Kind::UserTemp => t("Restanten van installaties en programma's (ouder dan 24 uur)", "Leftovers of installs and programs (older than 24 hours)"),
+            Kind::WindowsTemp => t("Tijdelijke bestanden van Windows zelf (ouder dan 24 uur)", "Temporary files of Windows itself (older than 24 hours)"),
+            Kind::BrowserCache => t("Opgeslagen webpagina's van Chrome, Edge, Brave en Firefox", "Stored web pages of Chrome, Edge, Brave and Firefox"),
+            Kind::UpdateCache => t("Al geïnstalleerde updates die nog op schijf staan", "Updates that are installed but still on disk"),
+            Kind::CrashDumps => t("Geheugendumps en rapporten van vastgelopen programma's", "Memory dumps and reports of crashed programs"),
+            Kind::RecycleBin => t("Bestanden die je eerder hebt verwijderd", "Files you deleted earlier"),
         }
     }
 

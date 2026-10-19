@@ -2,6 +2,8 @@
 //! installed programs, with advice per program, cache cleaning and a list
 //! of model files that can go to the Recycle Bin.
 
+use crate::i18n::t;
+use crate::tf;
 use crate::apps::{self, Cleanup, Spot};
 use crate::bulk_view::{self, BulkDelete};
 use crate::cleanup::{ROW_GAP, ROW_H, dialog, dialog_title, dim_background, file_name, notice, result_row};
@@ -123,9 +125,9 @@ impl AppsView {
             if let Ok((i, report, size)) = rx.try_recv() {
                 self.cache_rx = None;
                 self.sizes[i] = Some(size);
-                let mut text = format!("{}: {} vrijgemaakt.", self.spots[i].title, disk::format_size(report.freed));
+                let mut text = tf!("{}: {} vrijgemaakt.", "{}: {} freed.", self.spots[i].title, disk::format_size(report.freed));
                 if report.skipped > 0 {
-                    text.push_str(&format!(" {} in gebruik, overgeslagen.", ui::fmt_files(report.skipped as usize)));
+                    text.push_str(&tf!(" {} in gebruik, overgeslagen.", " {} in use, skipped.", ui::fmt_files(report.skipped as usize)));
                 }
                 self.message = Some((text, true));
             }
@@ -165,19 +167,19 @@ impl AppsView {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     let title = if measuring {
-                        format!("Bezig met meten… {} gevonden", disk::format_size(total))
+                        tf!("Bezig met meten… {} gevonden", "Measuring… {} found", disk::format_size(total))
                     } else {
-                        format!("{} aan programmagegevens", disk::format_size(total))
+                        tf!("{} aan programmagegevens", "{} of program data", disk::format_size(total))
                     };
                     ui.label(egui::RichText::new(title).font(theme::font_semibold(18.0)));
                     ui.label(
-                        egui::RichText::new("AI-modellen, emulators, Docker en caches. Per programma staat hoe je het veilig opruimt.")
+                        egui::RichText::new(t("AI-modellen, emulators, Docker en caches. Per programma staat hoe je het veilig opruimt.", "AI models, emulators, Docker and caches. Each program says how to clean it up safely."))
                             .color(theme::TEXT_DIM),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_enabled_ui(!measuring, |ui| {
-                        refresh = ui::icon_button(ui, icon::ARROW_CLOCKWISE, "Opnieuw meten").clicked();
+                        refresh = ui::icon_button(ui, icon::ARROW_CLOCKWISE, t("Opnieuw meten", "Measure again")).clicked();
                     });
                     if measuring {
                         ui.add(egui::Spinner::new().size(20.0).color(theme::ACCENT));
@@ -217,7 +219,7 @@ impl AppsView {
             }
             if !others.is_empty() {
                 ui.add_space(8.0);
-                ui::section_header(ui, icon::STACK, "Overige programmagegevens", Some(others.len()));
+                ui::section_header(ui, icon::STACK, t("Overige programmagegevens", "Other program data"), Some(others.len()));
                 for &i in &others {
                     if let Some(a) = spot_card(ui, &self.spots[i], self.sizes[i], self.cache_rx.is_some()) {
                         action = Some((i, a));
@@ -248,7 +250,7 @@ impl AppsView {
     fn draw_models(&mut self, ui: &mut egui::Ui, open: usize) {
         let mut back = false;
         ui.horizontal(|ui| {
-            back = ui::icon_button(ui, icon::ARROW_LEFT, "Terug naar programma's").clicked();
+            back = ui::icon_button(ui, icon::ARROW_LEFT, t("Terug naar programma's", "Back to programs")).clicked();
             ui.add_space(4.0);
             ui.label(egui::RichText::new(&self.spots[open].title).font(theme::font_semibold(18.0)));
         });
@@ -259,9 +261,9 @@ impl AppsView {
         let loading = self.models_rx.is_some();
         let total: u64 = self.models.iter().map(|m| m.size).sum();
         let summary = if loading {
-            "Modellen zoeken…".to_string()
+            t("Modellen zoeken…", "Looking for models…").to_string()
         } else {
-            format!("{} · {}, grootste eerst", ui::fmt_files(self.models.len()), disk::format_size(total))
+            tf!("{} · {}, grootste eerst", "{} · {}, largest first", ui::fmt_files(self.models.len()), disk::format_size(total))
         };
         ui.label(egui::RichText::new(summary).size(12.5).color(theme::TEXT_DIM));
         ui.add_space(8.0);
@@ -270,7 +272,7 @@ impl AppsView {
             return;
         }
         if self.models.is_empty() {
-            ui::empty_card(ui, icon::CHECK_CIRCLE, "Geen modelbestanden gevonden.");
+            ui::empty_card(ui, icon::CHECK_CIRCLE, t("Geen modelbestanden gevonden.", "No model files found."));
             return;
         }
         bulk_view::select_bar(ui, &self.models, &mut self.checked);
@@ -307,19 +309,19 @@ impl AppsView {
         let mut open = false;
         let mut remove = false;
         ui.horizontal_centered(|ui| {
-            bulk_view::selection_label(ui, &ticked, "Vink modellen aan om ze te verwijderen");
+            bulk_view::selection_label(ui, &ticked, t("Vink modellen aan om ze te verwijderen", "Tick models to remove them"));
             if let Some((text, success)) = &self.message {
                 let color = if *success { theme::SUCCESS } else { theme::DANGER };
                 ui.add_space(12.0);
                 ui.add(egui::Label::new(egui::RichText::new(text).color(color)).truncate());
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let button = ui::danger_icon_button(icon::TRASH, "Verwijderen…").min_size(vec2(150.0, 38.0));
+                let button = ui::danger_icon_button(icon::TRASH, t("Verwijderen…", "Remove…")).min_size(vec2(150.0, 38.0));
                 remove = ui.add_enabled(!ticked.is_empty() && !self.bulk.busy(), button).clicked();
-                let button = ui::secondary_icon_button(icon::ARROW_SQUARE_OUT, "Open in Verkenner").min_size(vec2(170.0, 38.0));
+                let button = ui::secondary_icon_button(icon::ARROW_SQUARE_OUT, t("Open in Verkenner", "Show in Explorer")).min_size(vec2(170.0, 38.0));
                 open = ui
                     .add_enabled(ticked.len() == 1, button)
-                    .on_disabled_hover_text("Vink precies één model aan")
+                    .on_disabled_hover_text(t("Vink precies één model aan", "Tick exactly one model"))
                     .clicked();
             });
         });
@@ -334,7 +336,7 @@ impl AppsView {
 
     fn show_in_explorer(&mut self, path: &std::path::Path) {
         if let Err(e) = largefiles::show_in_explorer(path) {
-            self.message = Some((format!("Verkenner openen mislukt: {e}"), false));
+            self.message = Some((tf!("Verkenner openen mislukt: {e}", "Could not open Explorer: {e}"), false));
         }
     }
 
@@ -345,7 +347,7 @@ impl AppsView {
         let mut decision = None;
         dim_background(ctx);
         dialog("apps_cache_confirm", ctx, |ui| {
-            dialog_title(ui, icon::BROOM, theme::ACCENT, &format!("{} leegmaken?", spot.title), &format!("{} wordt vrijgemaakt", disk::format_size(size)));
+            dialog_title(ui, icon::BROOM, theme::ACCENT, &tf!("{} leegmaken?", "Empty {}?", spot.title), &tf!("{} wordt vrijgemaakt", "{} will be freed", disk::format_size(size)));
             for f in &spot.folders {
                 ui.label(egui::RichText::new(f.display().to_string()).size(12.0).color(theme::TEXT_DIM));
             }
@@ -355,15 +357,19 @@ impl AppsView {
                 ui,
                 icon::WARNING_CIRCLE,
                 theme::DANGER,
-                "De inhoud wordt definitief verwijderd (niet via de prullenbak). Sluit het programma eerst; \
-                 bestanden die in gebruik zijn worden overgeslagen.",
+                t(
+                    "De inhoud wordt definitief verwijderd (niet via de prullenbak). Sluit het programma eerst; \
+                     bestanden die in gebruik zijn worden overgeslagen.",
+                    "The contents are deleted permanently (not via the Recycle Bin). Close the program first; \
+                     files in use are skipped.",
+                ),
             );
             ui.add_space(8.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(ui::primary_icon_button(icon::BROOM, "Leegmaken").min_size(vec2(140.0, 36.0))).clicked() {
+                if ui.add(ui::primary_icon_button(icon::BROOM, t("Leegmaken", "Empty")).min_size(vec2(140.0, 36.0))).clicked() {
                     decision = Some(true);
                 }
-                if ui.add(ui::secondary_icon_button(icon::X, "Annuleren").min_size(vec2(120.0, 36.0))).clicked() {
+                if ui.add(ui::secondary_icon_button(icon::X, t("Annuleren", "Cancel")).min_size(vec2(120.0, 36.0))).clicked() {
                     decision = Some(false);
                 }
             });
@@ -382,7 +388,7 @@ impl AppsView {
                     ctx.request_repaint();
                 });
                 self.cache_rx = Some(rx);
-                self.message = Some((format!("{} wordt leeggemaakt…", self.spots[i].title), true));
+                self.message = Some((tf!("{} wordt leeggemaakt…", "Emptying {}…", self.spots[i].title), true));
             }
             Some(false) => self.confirm_cache = None,
             None => {}
@@ -417,7 +423,7 @@ fn spot_card(ui: &mut egui::Ui, spot: &Spot, size: Option<u64>, busy: bool) -> O
                     ui.label(egui::RichText::new(&spot.title).font(theme::font_medium(14.5)));
                     if spot.cleanup == Cleanup::Advice {
                         ui.label(egui::RichText::new(icon::LOCK_SIMPLE).font(theme::icon(13.0)).color(theme::TEXT_FAINT))
-                            .on_hover_text("Opruimen via het programma zelf");
+                            .on_hover_text(t("Opruimen via het programma zelf", "Clean up via the program itself"));
                     }
                 });
                 ui.add(egui::Label::new(egui::RichText::new(spot.advice).size(12.0).color(theme::TEXT_DIM)).wrap());
@@ -432,19 +438,19 @@ fn spot_card(ui: &mut egui::Ui, spot: &Spot, size: Option<u64>, busy: bool) -> O
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 match spot.cleanup {
                     Cleanup::Models => {
-                        if ui.add(ui::primary_icon_button(icon::BRAIN, "Modellen bekijken")).clicked() {
+                        if ui.add(ui::primary_icon_button(icon::BRAIN, t("Modellen bekijken", "View models"))).clicked() {
                             action = Some(SpotAction::Models);
                         }
                     }
                     Cleanup::Cache => {
                         let can = !busy && size.is_some_and(|s| s > 0);
-                        if ui.add_enabled(can, ui::primary_icon_button(icon::BROOM, "Leegmaken")).clicked() {
+                        if ui.add_enabled(can, ui::primary_icon_button(icon::BROOM, t("Leegmaken", "Empty"))).clicked() {
                             action = Some(SpotAction::ClearCache);
                         }
                     }
                     Cleanup::Advice => {}
                 }
-                if ui.add(ui::secondary_icon_button(icon::ARROW_SQUARE_OUT, "Open in Verkenner")).clicked() {
+                if ui.add(ui::secondary_icon_button(icon::ARROW_SQUARE_OUT, t("Open in Verkenner", "Show in Explorer"))).clicked() {
                     action = Some(SpotAction::Explorer);
                 }
             });

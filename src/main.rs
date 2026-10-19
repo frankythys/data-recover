@@ -11,6 +11,7 @@ mod duplicates_view;
 mod fat;
 mod health;
 mod health_view;
+mod i18n;
 mod imaging;
 mod imaging_view;
 mod junk;
@@ -44,6 +45,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use i18n::t;
 use ui::ARROW_W;
 
 enum Screen {
@@ -95,15 +97,16 @@ impl TreeSel {
     /// Short Dutch description of the active filter, for the breadcrumb.
     fn describe(&self) -> String {
         match self {
-            TreeSel::All => "Alle bestanden".to_string(),
-            TreeSel::Year(0) => "Onbekende datum".to_string(),
+            TreeSel::All => t("Alle bestanden", "All files").to_string(),
+            TreeSel::Year(0) => t("Onbekende datum", "Unknown date").to_string(),
             TreeSel::Year(y) => y.to_string(),
             TreeSel::YearMonth(y, m) => {
-                let month = MONTHS_NL.get(m.wrapping_sub(1) as usize).copied().unwrap_or("?");
+                let months = if i18n::english() { MONTHS_EN } else { MONTHS_NL };
+                let month = months.get(m.wrapping_sub(1) as usize).copied().unwrap_or("?");
                 format!("{month} {y}")
             }
             TreeSel::Folder(p) => p.clone(),
-            TreeSel::RootFiles => "Hoofdmap".to_string(),
+            TreeSel::RootFiles => t("Hoofdmap", "Root folder").to_string(),
         }
     }
 }
@@ -111,6 +114,10 @@ impl TreeSel {
 const MONTHS_NL: [&str; 12] = [
     "januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september",
     "oktober", "november", "december",
+];
+const MONTHS_EN: [&str; 12] = [
+    "January", "February", "March", "April", "May", "June", "July", "August", "September",
+    "October", "November", "December",
 ];
 
 struct ScanHandle {
@@ -279,8 +286,9 @@ impl DataRecovererApp {
         let fs = vol.filesystem.to_uppercase();
         if !matches!(fs.as_str(), "" | "NTFS" | "FAT" | "FAT32" | "EXFAT") {
             self.message = Some((
-                format!(
+                tf!(
                     "{} gebruikt {}. Ondersteund worden NTFS, FAT (12/16/32) en exFAT.",
+                    "{} uses {}. Supported are NTFS, FAT (12/16/32) and exFAT.",
                     vol.display_name(),
                     vol.filesystem
                 ),
@@ -300,7 +308,8 @@ impl DataRecovererApp {
             .get(..2)
             .and_then(|letter| self.volumes.iter().position(|v| v.letter.eq_ignore_ascii_case(letter)));
         let Some(i) = volume else {
-            self.message = Some((format!("{} staat niet op een schijf van deze computer.", folder.display()), false));
+            let folder = folder.display();
+            self.message = Some((tf!("{folder} staat niet op een schijf van deze computer.", "{folder} is not on a disk of this computer."), false));
             return;
         };
         let on_volume = text[2..].trim_end_matches('\\');
@@ -321,11 +330,15 @@ impl DataRecovererApp {
             scan.finished_after = Some(scan.started_at.elapsed().as_secs());
             if let Err(e) = result {
                 let msg = if e.kind() == io::ErrorKind::PermissionDenied {
-                    "Toegang geweigerd. Start DiskTools als administrator \
-                     (rechtermuisknop → Als administrator uitvoeren)."
-                        .to_string()
+                    t(
+                        "Toegang geweigerd. Start DiskTools als administrator \
+                         (rechtermuisknop → Als administrator uitvoeren).",
+                        "Access denied. Start DiskTools as administrator \
+                         (right-click → Run as administrator).",
+                    )
+                    .to_string()
                 } else {
-                    format!("Scan mislukt: {e}")
+                    tf!("Scan mislukt: {e}", "Scan failed: {e}")
                 };
                 self.message = Some((msg, false));
             }
@@ -357,9 +370,9 @@ impl DataRecovererApp {
         if self.tree_sel != TreeSel::All {
             self.tree_sel.describe()
         } else if let Some(cat) = self.open_category {
-            cat.to_string()
+            ntfs::category_label(cat).to_string()
         } else {
-            "Alle bestanden".to_string()
+            t("Alle bestanden", "All files").to_string()
         }
     }
 
@@ -371,43 +384,63 @@ impl DataRecovererApp {
         ui.spacing_mut().item_spacing.y = 2.0;
         ui::logo(ui);
         ui.add_space(6.0);
-        ui::sidebar_caption(ui, "Herstel");
+        ui::sidebar_caption(ui, t("Herstel", "Recovery"));
         let home = matches!(self.screen, Screen::Home);
-        if ui::nav_item(ui, icon::HARD_DRIVES, "Schijven & locaties", home).clicked() {
+        if ui::nav_item(ui, icon::HARD_DRIVES, t("Schijven & locaties", "Drives & locations"), home).clicked() {
             self.screen = Screen::Home;
         }
         ui.add_space(6.0);
-        ui::sidebar_caption(ui, "Opruimen");
+        ui::sidebar_caption(ui, t("Opruimen", "Clean up"));
         let cleanup = matches!(self.screen, Screen::Cleanup);
-        if ui::nav_item(ui, icon::BROOM, "Schijf opruimen", cleanup).clicked() {
+        if ui::nav_item(ui, icon::BROOM, t("Schijf opruimen", "Disk cleanup"), cleanup).clicked() {
             self.screen = Screen::Cleanup;
         }
         ui.add_space(6.0);
-        ui::sidebar_caption(ui, "Schijftools");
+        ui::sidebar_caption(ui, t("Schijftools", "Disk tools"));
         let health = matches!(self.screen, Screen::Health);
-        if ui::nav_item(ui, icon::HEARTBEAT, "Schijfgezondheid", health).clicked() {
+        if ui::nav_item(ui, icon::HEARTBEAT, t("Schijfgezondheid", "Disk health"), health).clicked() {
             self.screen = Screen::Health;
         }
         let surface = matches!(self.screen, Screen::Surface);
-        if ui::nav_item(ui, icon::PULSE, "Oppervlaktetest", surface).clicked() {
+        if ui::nav_item(ui, icon::PULSE, t("Oppervlaktetest", "Surface test"), surface).clicked() {
             self.screen = Screen::Surface;
         }
         let speed = matches!(self.screen, Screen::Speed);
-        if ui::nav_item(ui, icon::SPEEDOMETER, "Snelheidstest", speed).clicked() {
+        if ui::nav_item(ui, icon::SPEEDOMETER, t("Snelheidstest", "Speed test"), speed).clicked() {
             self.screen = Screen::Speed;
         }
         let partitions = matches!(self.screen, Screen::Partitions);
-        if ui::nav_item(ui, icon::SQUARE_SPLIT_HORIZONTAL, "Partities", partitions).clicked() {
+        if ui::nav_item(ui, icon::SQUARE_SPLIT_HORIZONTAL, t("Partities", "Partitions"), partitions).clicked() {
             self.screen = Screen::Partitions;
         }
         let imaging = matches!(self.screen, Screen::Imaging);
-        if ui::nav_item(ui, icon::DISC, "Schijfimage maken", imaging).clicked() {
+        if ui::nav_item(ui, icon::DISC, t("Schijfimage maken", "Create disk image"), imaging).clicked() {
             self.screen = Screen::Imaging;
         }
         let wipe = matches!(self.screen, Screen::Wipe);
-        if ui::nav_item(ui, icon::ERASER, "Veilig wissen", wipe).clicked() {
+        if ui::nav_item(ui, icon::ERASER, t("Veilig wissen", "Secure erase"), wipe).clicked() {
             self.screen = Screen::Wipe;
         }
+        self.draw_language_switch(ui);
+    }
+
+    /// "Nederlands | English" at the bottom of the sidebar.
+    fn draw_language_switch(&mut self, ui: &mut egui::Ui) {
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                ui.add_space(18.0);
+                ui.label(egui::RichText::new(icon::GLOBE).font(theme::icon(15.0)).color(theme::TEXT_DIM));
+                for (lang, name) in [(i18n::Lang::Nl, "Nederlands"), (i18n::Lang::En, "English")] {
+                    let current = i18n::lang() == lang;
+                    if ui.selectable_label(current, name).clicked() && !current {
+                        if let Err(e) = i18n::save(lang) {
+                            self.message = Some((tf!("Taal niet bewaard: {e}", "Language not saved: {e}"), false));
+                        }
+                    }
+                }
+            });
+        });
     }
 
     /// Left panel in Browse mode: the "Opnamedatum" / "Oorspronkelijke map"
@@ -460,8 +493,8 @@ impl DataRecovererApp {
             .show(ui, |ui| {
                 let active = if tab == BrowseTab::Date { 0 } else { 1 };
                 let tabs = [
-                    (icon::CALENDAR_BLANK, "Datum", "Groeperen op opnamedatum (laatst gewijzigd)"),
-                    (icon::FOLDER, "Mappen", "Groeperen op oorspronkelijke map"),
+                    (icon::CALENDAR_BLANK, t("Datum", "Date"), t("Groeperen op opnamedatum (laatst gewijzigd)", "Group by date taken (last modified)")),
+                    (icon::FOLDER, t("Mappen", "Folders"), t("Groeperen op oorspronkelijke map", "Group by original folder")),
                 ];
                 if let Some(i) = ui::segmented_tabs(ui, tabs, active) {
                     new_tab = Some(if i == 0 { BrowseTab::Date } else { BrowseTab::Folder });
@@ -472,7 +505,7 @@ impl DataRecovererApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let all = current == TreeSel::All;
-                        if ui::tree_row(ui, ARROW_W, None, Some(icon::STACK), "Alle data", total, all).0 {
+                        if ui::tree_row(ui, ARROW_W, None, Some(icon::STACK), t("Alle data", "All data"), total, all).0 {
                             new_sel = Some(TreeSel::All);
                         }
                         match tab {
@@ -513,7 +546,7 @@ impl DataRecovererApp {
                                         ARROW_W,
                                         None,
                                         Some(icon::CLOCK),
-                                        "Onbekende datum",
+                                        t("Onbekende datum", "Unknown date"),
                                         unknown_date,
                                         sel,
                                     );
@@ -530,7 +563,7 @@ impl DataRecovererApp {
                                         ARROW_W,
                                         None,
                                         Some(icon::FOLDER_SIMPLE),
-                                        "Hoofdmap (losse bestanden)",
+                                        t("Hoofdmap (losse bestanden)", "Root folder (loose files)"),
                                         n,
                                         sel,
                                     );
@@ -585,14 +618,14 @@ impl DataRecovererApp {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
-                ui.heading("Kies een locatie om het herstel te starten");
+                ui.heading(t("Kies een locatie om het herstel te starten", "Choose a location to start recovery"));
                 ui.label(
-                    egui::RichText::new("Selecteer een schijf of image om verwijderde bestanden te zoeken.")
+                    egui::RichText::new(t("Selecteer een schijf of image om verwijderde bestanden te zoeken.", "Select a drive or image to search for deleted files."))
                         .color(theme::TEXT_DIM),
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                if ui::icon_button(ui, icon::ARROW_CLOCKWISE, "Opnieuw zoeken naar schijven").clicked() {
+                if ui::icon_button(ui, icon::ARROW_CLOCKWISE, t("Opnieuw zoeken naar schijven", "Search for drives again")).clicked() {
                     self.volumes = disk::list_volumes();
                 }
             });
@@ -631,9 +664,9 @@ impl DataRecovererApp {
             let (_, drive_w) = ui::grid_columns(avail, 320.0, 14.0);
             let (_, tile_w) = ui::grid_columns(avail, 280.0, 14.0);
 
-            ui::section_header(ui, icon::HARD_DRIVES, "Harde schijven", Some(internal.len()));
+            ui::section_header(ui, icon::HARD_DRIVES, t("Harde schijven", "Hard drives"), Some(internal.len()));
             if internal.is_empty() {
-                ui::empty_card(ui, icon::INFO, "Geen interne schijven gevonden. Start de app als administrator.");
+                ui::empty_card(ui, icon::INFO, t("Geen interne schijven gevonden. Start de app als administrator.", "No internal drives found. Start the app as administrator."));
             } else {
                 ui.horizontal_wrapped(|ui| {
                     for &i in &internal {
@@ -645,9 +678,9 @@ impl DataRecovererApp {
             }
             ui.add_space(8.0);
 
-            ui::section_header(ui, icon::USB, "Externe schijven", Some(external.len()));
+            ui::section_header(ui, icon::USB, t("Externe schijven", "External drives"), Some(external.len()));
             if external.is_empty() {
-                ui::empty_card(ui, icon::USB, "Geen externe schijven aangesloten.");
+                ui::empty_card(ui, icon::USB, t("Geen externe schijven aangesloten.", "No external drives connected."));
             } else {
                 ui.horizontal_wrapped(|ui| {
                     for &i in &external {
@@ -659,19 +692,19 @@ impl DataRecovererApp {
             }
             ui.add_space(8.0);
 
-            ui::section_header(ui, icon::LIGHTNING, "Snelle toegang", None);
+            ui::section_header(ui, icon::LIGHTNING, t("Snelle toegang", "Quick access"), None);
             let mut quick: Option<QuickAction> = None;
             ui.horizontal_wrapped(|ui| {
-                if ui::quick_tile(ui, tile_w, icon::DISC, "Schijfimage", "Een .img- of .dd-bestand scannen", true) {
+                if ui::quick_tile(ui, tile_w, icon::DISC, t("Schijfimage", "Disk image"), t("Een .img- of .dd-bestand scannen", "Scan an .img or .dd file"), true) {
                     quick = Some(QuickAction::DiskImage);
                 }
-                if ui::quick_tile(ui, tile_w, icon::DESKTOP, "Desktop", "Verwijderd van het bureaublad", true) {
+                if ui::quick_tile(ui, tile_w, icon::DESKTOP, "Desktop", t("Verwijderd van het bureaublad", "Deleted from the desktop"), true) {
                     quick = Some(QuickAction::Desktop);
                 }
-                if ui::quick_tile(ui, tile_w, icon::FOLDER_OPEN, "Map selecteren", "Eén map doorzoeken", true) {
+                if ui::quick_tile(ui, tile_w, icon::FOLDER_OPEN, t("Map selecteren", "Select folder"), t("Eén map doorzoeken", "Search one folder"), true) {
                     quick = Some(QuickAction::Folder);
                 }
-                if ui::quick_tile(ui, tile_w, icon::TRASH, "Prullenbak", "Geleegde prullenbak", true) {
+                if ui::quick_tile(ui, tile_w, icon::TRASH, t("Prullenbak", "Recycle Bin"), t("Geleegde prullenbak", "Emptied Recycle Bin"), true) {
                     quick = Some(QuickAction::RecycleBin);
                 }
             });
@@ -689,21 +722,21 @@ impl DataRecovererApp {
         match action {
             QuickAction::DiskImage => {
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Schijfimage", &["img", "dd", "bin", "raw", "iso", "vhd"])
-                    .add_filter("Alle bestanden", &["*"])
+                    .add_filter(t("Schijfimage", "Disk image"), &["img", "dd", "bin", "raw", "iso", "vhd"])
+                    .add_filter(t("Alle bestanden", "All files"), &["*"])
                     .pick_file()
                 {
                     let label = path
                         .file_name()
                         .and_then(|n| n.to_str())
-                        .unwrap_or("Schijfimage")
+                        .unwrap_or(t("Schijfimage", "Disk image"))
                         .to_string();
                     self.start_scan(path.to_string_lossy().into_owned(), label, Scope::Drive, ctx);
                 }
             }
             QuickAction::Desktop => match disk::desktop_folder() {
-                Some(dir) => self.scan_folder(&dir, "Bureaublad".to_string(), ctx),
-                None => self.message = Some(("De bureaubladmap is niet gevonden.".to_string(), false)),
+                Some(dir) => self.scan_folder(&dir, t("Bureaublad", "Desktop").to_string(), ctx),
+                None => self.message = Some((t("De bureaubladmap is niet gevonden.", "The desktop folder was not found.").to_string(), false)),
             },
             QuickAction::Folder => {
                 if let Some(dir) = rfd::FileDialog::new().pick_folder() {
@@ -717,10 +750,13 @@ impl DataRecovererApp {
                 // files from its emptied bin, under their own names.
                 let letter = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
                 match self.volumes.iter().position(|v| v.letter.eq_ignore_ascii_case(&letter)) {
-                    Some(i) => self.scan_volume(i, format!("Prullenbak ({letter})"), Scope::RecycleBin, ctx),
+                    Some(i) => self.scan_volume(i, tf!("Prullenbak ({letter})", "Recycle Bin ({letter})"), Scope::RecycleBin, ctx),
                     None => {
                         self.message = Some((
-                            format!("Schijf {letter} niet gevonden. Start DiskTools als administrator."),
+                            tf!(
+                                "Schijf {letter} niet gevonden. Start DiskTools als administrator.",
+                                "Drive {letter} not found. Start DiskTools as administrator."
+                            ),
                             false,
                         ))
                     }
@@ -765,7 +801,7 @@ impl DataRecovererApp {
         let mut go_root = false;
         ui.horizontal(|ui| {
             let filtered = self.tree_sel != TreeSel::All || self.open_category.is_some();
-            let tip = if filtered { "Terug naar alle bestanden" } else { "Terug naar schijven" };
+            let tip = if filtered { t("Terug naar alle bestanden", "Back to all files") } else { t("Terug naar schijven", "Back to drives") };
             if ui::icon_button(ui, icon::ARROW_LEFT, tip).clicked() {
                 go_back = true;
             }
@@ -814,16 +850,17 @@ impl DataRecovererApp {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     let title = if finished {
-                        "Scan voltooid"
+                        t("Scan voltooid", "Scan complete")
                     } else if is_paused {
-                        "Gepauzeerd"
+                        t("Gepauzeerd", "Paused")
                     } else {
-                        "Bezig met scannen…"
+                        t("Bezig met scannen…", "Scanning…")
                     };
                     ui.label(egui::RichText::new(title).font(theme::font_semibold(16.0)));
                     ui.label(
-                        egui::RichText::new(format!(
+                        egui::RichText::new(tf!(
                             "{} gevonden · {} · {} van {} records · {}",
+                            "{} found · {} · {} of {} records · {}",
                             ui::fmt_files(found_snapshot.len()),
                             disk::format_size(total_found_size),
                             ui::fmt_thousands(records_scanned),
@@ -836,7 +873,7 @@ impl DataRecovererApp {
                         let current = found_snapshot.last().map(|f| f.name.as_str()).unwrap_or("…");
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new(format!("Laatst gevonden: {current}"))
+                                egui::RichText::new(tf!("Laatst gevonden: {current}", "Last found: {current}"))
                                     .size(12.0)
                                     .color(theme::TEXT_FAINT),
                             )
@@ -846,13 +883,13 @@ impl DataRecovererApp {
                 });
                 if !finished {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui::icon_button(ui, icon::STOP, "Scan stoppen").clicked() {
+                        if ui::icon_button(ui, icon::STOP, t("Scan stoppen", "Stop scan")).clicked() {
                             cancel.store(true, Ordering::Relaxed);
                         }
                         let (glyph, tip) = if is_paused {
-                            (icon::PLAY, "Hervatten")
+                            (icon::PLAY, t("Hervatten", "Resume"))
                         } else {
-                            (icon::PAUSE, "Pauzeren")
+                            (icon::PAUSE, t("Pauzeren", "Pause"))
                         };
                         if ui::icon_button(ui, glyph, tip).clicked() {
                             paused_flag.store(!is_paused, Ordering::Relaxed);
@@ -876,13 +913,13 @@ impl DataRecovererApp {
         if !visible.is_empty() {
             ui.horizontal(|ui| {
                 let all_on = visible.iter().all(|&i| self.selected[i]);
-                if ui::checkbox_label(ui, all_on, "Alles selecteren") {
+                if ui::checkbox_label(ui, all_on, t("Alles selecteren", "Select all")) {
                     for &i in &visible {
                         self.selected[i] = !all_on;
                     }
                 }
                 ui.label(
-                    egui::RichText::new(format!("{} in deze weergave", ui::fmt_files(visible.len())))
+                    egui::RichText::new(tf!("{} in deze weergave", "{} in this view", ui::fmt_files(visible.len())))
                         .color(theme::TEXT_DIM),
                 );
             });
@@ -900,19 +937,21 @@ impl DataRecovererApp {
                         if !finished {
                             ui.add(egui::Spinner::new().size(28.0).color(theme::ACCENT));
                             ui.add_space(8.0);
-                            ui.label(egui::RichText::new("Zoeken naar verwijderde bestanden…").color(theme::TEXT_DIM));
+                            ui.label(egui::RichText::new(t("Zoeken naar verwijderde bestanden…", "Searching for deleted files…")).color(theme::TEXT_DIM));
                         } else if total_records == 0 {
                             ui.label(egui::RichText::new(icon::WARNING_CIRCLE).font(theme::icon(34.0)).color(theme::TEXT_FAINT));
                             ui.label(
-                                egui::RichText::new(
+                                egui::RichText::new(t(
                                     "Geen ondersteund bestandssysteem gevonden. \
                                      Ondersteund worden NTFS, FAT (12/16/32) en exFAT.",
-                                )
+                                    "No supported file system found. \
+                                     Supported are NTFS, FAT (12/16/32) and exFAT.",
+                                ))
                                 .color(theme::TEXT_DIM),
                             );
                         } else {
                             ui.label(egui::RichText::new(icon::CHECK_CIRCLE).font(theme::icon(34.0)).color(theme::TEXT_FAINT));
-                            ui.label(egui::RichText::new("Geen verwijderde bestanden gevonden.").color(theme::TEXT_DIM));
+                            ui.label(egui::RichText::new(t("Geen verwijderde bestanden gevonden.", "No deleted files found.")).color(theme::TEXT_DIM));
                         }
                     });
                 } else if self.tree_sel == TreeSel::All && self.open_category.is_none() {
@@ -976,10 +1015,10 @@ impl DataRecovererApp {
         let mut recover = false;
         ui.horizontal_centered(|ui| {
             if count == 0 {
-                ui.label(egui::RichText::new("Selecteer bestanden om te herstellen").color(theme::TEXT_DIM));
+                ui.label(egui::RichText::new(t("Selecteer bestanden om te herstellen", "Select files to recover")).color(theme::TEXT_DIM));
             } else {
                 ui.label(
-                    egui::RichText::new(format!("{} geselecteerd", ui::fmt_thousands(count as u64)))
+                    egui::RichText::new(tf!("{} geselecteerd", "{} selected", ui::fmt_thousands(count as u64)))
                         .font(theme::font_semibold(14.0)),
                 );
                 ui.label(egui::RichText::new(disk::format_size(bytes)).color(theme::TEXT_DIM));
@@ -995,7 +1034,7 @@ impl DataRecovererApp {
                 ui.add(egui::Label::new(egui::RichText::new(text).color(color)).truncate());
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let button = ui::primary_icon_button(icon::DOWNLOAD_SIMPLE, "Herstellen");
+                let button = ui::primary_icon_button(icon::DOWNLOAD_SIMPLE, t("Herstellen", "Recover"));
                 if ui
                     .add_enabled(count > 0, button.min_size(egui::vec2(140.0, 38.0)))
                     .clicked()
@@ -1026,13 +1065,13 @@ impl DataRecovererApp {
                 continue;
             }
             if let Err(e) = ntfs::recover_file(&drive_path, found, &out_dir) {
-                self.message = Some((format!("Herstel van {} mislukt: {e}", found.name), false));
+                self.message = Some((tf!("Herstel van {} mislukt: {e}", "Recovering {} failed: {e}", found.name), false));
                 return;
             }
             count += 1;
         }
         self.message = Some((
-            format!("{count} bestand(en) hersteld naar {}", out_dir.display()),
+            tf!("{count} bestand(en) hersteld naar {}", "{count} file(s) recovered to {}", out_dir.display()),
             true,
         ));
     }
@@ -1236,10 +1275,17 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
+            i18n::load();
             let mut app = DataRecovererApp::new(&cc.egui_ctx);
             // `disktools --scan <pad>` opent meteen een scan van een schijf
             // of image, zonder bestandsdialoog (handig om te testen).
             let args: Vec<String> = std::env::args().collect();
+            // `disktools --taal en` starts in English without remembering it.
+            match args.iter().position(|a| a == "--taal").and_then(|i| args.get(i + 1)).map(String::as_str) {
+                Some("en") => i18n::set(i18n::Lang::En),
+                Some("nl") => i18n::set(i18n::Lang::Nl),
+                _ => {}
+            }
             if let Some(path) = args
                 .iter()
                 .position(|a| a == "--scan")

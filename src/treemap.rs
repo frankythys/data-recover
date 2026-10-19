@@ -2,6 +2,7 @@
 //! matches its size, laid out with the "squarified" algorithm (Bruls,
 //! Huizing & van Wijk) so the rectangles stay close to squares.
 
+use crate::i18n;
 use crate::{disk, theme, ui};
 use egui::{Rect, Sense, pos2, vec2};
 
@@ -109,7 +110,11 @@ pub fn draw(ui: &mut egui::Ui, items: &[Item]) -> Option<Hit> {
                 ui.painter().galley(rect.min + vec2(5.0, 20.0), s, theme::TEXT_DIM);
             }
         }
-        let hint = if item.folder { "Klik om de map te openen" } else { "Klik om te selecteren, dubbelklik om te openen in Verkenner" };
+        let hint = if item.folder {
+            i18n::t("Klik om de map te openen", "Click to open the folder")
+        } else {
+            i18n::t("Klik om te selecteren, dubbelklik om te openen in Verkenner", "Click to select, double-click to show in Explorer")
+        };
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{}\n{size}\n{hint}", item.label));
         if resp.double_clicked() {
             hit = Some(Hit { index, double: true });

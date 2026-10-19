@@ -1,6 +1,8 @@
 //! "Schijfimage maken" screen: pick a disk or partition and a destination,
 //! copy it into one `.img` file and scan that copy for deleted files.
 
+use crate::i18n::t;
+use crate::tf;
 use crate::cleanup::{file_name, location_chip, notice};
 use crate::disk::{self, DriveKind, VolumeInfo};
 use crate::health::{self, Bus, DiskHealth};
@@ -53,8 +55,8 @@ impl Source {
     /// File name suggested for the image.
     fn default_file(&self) -> String {
         let base = match self {
-            Source::Disk { index, .. } => format!("Schijf{index}"),
-            Source::Volume { letter, .. } => format!("Station_{}", letter.trim_end_matches(':')),
+            Source::Disk { index, .. } => tf!("Schijf{index}", "Disk{index}"),
+            Source::Volume { letter, .. } => tf!("Station_{}", "Drive_{}", letter.trim_end_matches(':')),
         };
         format!("{base}.img")
     }
@@ -110,10 +112,13 @@ impl ImagingView {
 
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
-            ui.heading("Schijfimage maken");
+            ui.heading(t("Schijfimage maken", "Create disk image"));
             ui.label(
                 egui::RichText::new(
-                    "Een exacte kopie van een schijf in één bestand. Herstel daarna uit de kopie, zodat een zwakke schijf niet verder belast wordt.",
+                    t(
+                        "Een exacte kopie van een schijf in één bestand. Herstel daarna uit de kopie, zodat een zwakke schijf niet verder belast wordt.",
+                        "An exact copy of a disk in one file. Then recover from the copy, so a weak disk is not strained further.",
+                    ),
                 )
                 .color(theme::TEXT_DIM),
             );
@@ -134,7 +139,7 @@ impl ImagingView {
     }
 
     fn draw_sources(&mut self, ui: &mut egui::Ui, volumes: &[VolumeInfo]) {
-        ui::section_header(ui, icon::HARD_DRIVES, "Bron: hele schijf", None);
+        ui::section_header(ui, icon::HARD_DRIVES, t("Bron: hele schijf", "Source: whole disk"), None);
         if self.disks_rx.is_some() {
             ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT));
         }
@@ -144,14 +149,14 @@ impl ImagingView {
             for d in &self.disks {
                 let source = Source::Disk { index: d.index, name: d.model.clone(), size: d.size };
                 let glyph = if d.bus == Bus::Usb { icon::USB } else { icon::HARD_DRIVE };
-                let sub = format!("Schijf {} · {}", d.index, disk::format_size(d.size));
+                let sub = tf!("Schijf {} · {}", "Disk {} · {}", d.index, disk::format_size(d.size));
                 if location_chip(ui, glyph, &d.model, &sub, self.source.as_ref() == Some(&source)) {
                     picked = Some(source);
                 }
             }
         });
         ui.add_space(10.0);
-        ui::section_header(ui, icon::HARD_DRIVE, "Of één partitie", None);
+        ui::section_header(ui, icon::HARD_DRIVE, t("Of één partitie", "Or one partition"), None);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
             for v in volumes {
@@ -169,7 +174,7 @@ impl ImagingView {
     }
 
     fn draw_destination(&mut self, ui: &mut egui::Ui, volumes: &[VolumeInfo]) {
-        ui::section_header(ui, icon::FLOPPY_DISK, "Bestemming", None);
+        ui::section_header(ui, icon::FLOPPY_DISK, t("Bestemming", "Destination"), None);
         let mut choose = false;
         let mut start = false;
         let problem = self.problem(volumes);
@@ -178,25 +183,25 @@ impl ImagingView {
             ui.horizontal(|ui| {
                 let text = match &self.dest {
                     Some(p) => p.display().to_string(),
-                    None => "Nog geen bestand gekozen".to_string(),
+                    None => t("Nog geen bestand gekozen", "No file chosen yet").to_string(),
                 };
                 let color = if self.dest.is_some() { theme::TEXT_MAIN } else { theme::TEXT_DIM };
                 ui.label(egui::RichText::new(icon::FILE).font(theme::icon(18.0)).color(theme::TEXT_DIM));
                 ui.add(egui::Label::new(egui::RichText::new(text).color(color)).truncate());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let ready = self.source.is_some() && self.dest.is_some() && problem.is_none();
-                    let button = ui::primary_icon_button(icon::DISC, "Image maken").min_size(vec2(150.0, 36.0));
+                    let button = ui::primary_icon_button(icon::DISC, t("Image maken", "Create image")).min_size(vec2(150.0, 36.0));
                     start = ui.add_enabled(ready, button).clicked();
                     choose = ui
-                        .add_enabled(self.source.is_some(), ui::secondary_icon_button(icon::FOLDER_OPEN, "Kiezen…"))
-                        .on_disabled_hover_text("Kies eerst een bron")
+                        .add_enabled(self.source.is_some(), ui::secondary_icon_button(icon::FOLDER_OPEN, t("Kiezen…", "Choose…")))
+                        .on_disabled_hover_text(t("Kies eerst een bron", "Choose a source first"))
                         .clicked();
                 });
             });
             if let Some(source) = &self.source {
                 ui.add_space(4.0);
                 ui.label(
-                    egui::RichText::new(format!("Kopie van {} · ongeveer {} nodig", source.name(), disk::format_size(source.size())))
+                    egui::RichText::new(tf!("Kopie van {} · ongeveer {} nodig", "Copy of {} · about {} needed", source.name(), disk::format_size(source.size())))
                         .size(12.5)
                         .color(theme::TEXT_DIM),
                 );
@@ -211,13 +216,17 @@ impl ImagingView {
             ui,
             icon::INFO,
             theme::ACCENT,
-            "Zet de image op een andere schijf dan de bron, het liefst een externe schijf. Er wordt alleen gelezen \
-             van de bron. Onleesbare stukken worden met nullen gevuld, zodat de kopie toch afkomt.",
+            t(
+                "Zet de image op een andere schijf dan de bron, het liefst een externe schijf. Er wordt alleen gelezen \
+                 van de bron. Onleesbare stukken worden met nullen gevuld, zodat de kopie toch afkomt.",
+                "Put the image on another disk than the source, preferably an external one. The source is only read. \
+                 Unreadable parts are filled with zeros, so the copy still completes.",
+            ),
         );
         if choose {
             if let Some(source) = &self.source {
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Schijfimage", &["img"])
+                    .add_filter(t("Schijfimage", "Disk image"), &["img"])
                     .set_file_name(source.default_file())
                     .save_file()
                 {
@@ -239,22 +248,27 @@ impl ImagingView {
         let vol = text.get(..2).and_then(|l| volumes.iter().find(|v| v.letter.eq_ignore_ascii_case(l)))?;
         if source.disk().is_some() && source.disk() == vol.disk_index {
             return Some(
-                "De image kan niet op dezelfde schijf als de bron: dan overschrijf je juist de bestanden die je wilt \
-                 herstellen. Kies een andere schijf."
-                    .to_string(),
+                t(
+                    "De image kan niet op dezelfde schijf als de bron: dan overschrijf je juist de bestanden die je wilt \
+                     herstellen. Kies een andere schijf.",
+                    "The image cannot go on the same disk as the source: that would overwrite the very files you want \
+                     to recover. Choose another disk.",
+                )
+                .to_string(),
             );
         }
         let free = vol.total_bytes.saturating_sub(vol.used_bytes);
         if free < source.size() {
-            return Some(format!(
+            return Some(tf!(
                 "Niet genoeg ruimte op {}: nodig {}, vrij {}.",
+                "Not enough space on {}: {} needed, {} free.",
                 vol.display_name(),
                 disk::format_size(source.size()),
                 disk::format_size(free)
             ));
         }
         if vol.filesystem.eq_ignore_ascii_case("FAT32") && source.size() > FAT32_MAX_FILE {
-            return Some(format!("{} gebruikt FAT32, dat geen bestanden groter dan 4 GB kan opslaan.", vol.display_name()));
+            return Some(tf!("{} gebruikt FAT32, dat geen bestanden groter dan 4 GB kan opslaan.", "{} uses FAT32, which cannot store files larger than 4 GB.", vol.display_name()));
         }
         None
     }
@@ -270,18 +284,18 @@ impl ImagingView {
         let (cancel, paused_flag) = (job.cancel.clone(), job.paused.clone());
 
         let (title, color) = match &job.result {
-            None if paused => ("Gepauzeerd".to_string(), theme::ACCENT),
-            None => (format!("Image maken van {}…", job.source_label), theme::ACCENT),
-            Some(Ok(done)) if done.cancelled => ("Gestopt. De image is onvolledig.".to_string(), theme::WARNING),
-            Some(Ok(_)) => ("Image klaar".to_string(), theme::SUCCESS),
-            Some(Err(e)) => (format!("Image maken mislukt: {e}"), theme::DANGER),
+            None if paused => (t("Gepauzeerd", "Paused").to_string(), theme::ACCENT),
+            None => (tf!("Image maken van {}…", "Creating image of {}…", job.source_label), theme::ACCENT),
+            Some(Ok(done)) if done.cancelled => (t("Gestopt. De image is onvolledig.", "Stopped. The image is incomplete.").to_string(), theme::WARNING),
+            Some(Ok(_)) => (t("Image klaar", "Image ready").to_string(), theme::SUCCESS),
+            Some(Err(e)) => (tf!("Image maken mislukt: {e}", "Creating the image failed: {e}"), theme::DANGER),
         };
-        let mut detail = format!("{} van {}", disk::format_size(p.done), disk::format_size(p.total));
+        let mut detail = tf!("{} van {}", "{} of {}", disk::format_size(p.done), disk::format_size(p.total));
         if speed > 0 {
             detail.push_str(&format!(" · {}/s", disk::format_size(speed)));
             if job.running() && !paused {
                 let left = p.total.saturating_sub(p.done) / speed.max(1);
-                detail.push_str(&format!(" · nog {}", ui::fmt_duration(left)));
+                detail.push_str(&tf!(" · nog {}", " · {} left", ui::fmt_duration(left)));
             }
         }
 
@@ -303,18 +317,18 @@ impl ImagingView {
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if job.running() {
-                        if ui::icon_button(ui, icon::STOP, "Stoppen").clicked() {
+                        if ui::icon_button(ui, icon::STOP, t("Stoppen", "Stop")).clicked() {
                             cancel.store(true, Ordering::Relaxed);
                         }
-                        let (glyph, tip) = if paused { (icon::PLAY, "Hervatten") } else { (icon::PAUSE, "Pauzeren") };
+                        let (glyph, tip) = if paused { (icon::PLAY, t("Hervatten", "Resume")) } else { (icon::PAUSE, t("Pauzeren", "Pause")) };
                         if ui::icon_button(ui, glyph, tip).clicked() {
                             paused_flag.store(!paused, Ordering::Relaxed);
                         }
                     } else if matches!(job.result, Some(Ok(_))) {
-                        if ui.add(ui::primary_icon_button(icon::MAGNIFYING_GLASS, "Image scannen").min_size(vec2(150.0, 36.0))).clicked() {
+                        if ui.add(ui::primary_icon_button(icon::MAGNIFYING_GLASS, t("Image scannen", "Scan image")).min_size(vec2(150.0, 36.0))).clicked() {
                             scan = Some((job.dest.display().to_string(), file_name(&job.dest)));
                         }
-                        open = ui.add(ui::secondary_icon_button(icon::ARROW_SQUARE_OUT, "Open in Verkenner")).clicked();
+                        open = ui.add(ui::secondary_icon_button(icon::ARROW_SQUARE_OUT, t("Open in Verkenner", "Show in Explorer"))).clicked();
                     }
                 });
             });
@@ -330,9 +344,11 @@ impl ImagingView {
                 ui,
                 icon::WARNING_CIRCLE,
                 theme::WARNING,
-                &format!(
+                &tf!(
                     "{} kon niet gelezen worden en is met nullen gevuld. De schijf heeft beschadigde sectoren; \
                      herstel voortaan uit deze image.",
+                    "{} could not be read and was filled with zeros. The disk has damaged sectors; \
+                     recover from this image from now on.",
                     disk::format_size(p.unreadable)
                 ),
             );
@@ -343,7 +359,7 @@ impl ImagingView {
         }
         if open {
             let dest = job.dest.clone();
-            self.message = crate::largefiles::show_in_explorer(&dest).err().map(|e| format!("Verkenner openen mislukt: {e}"));
+            self.message = crate::largefiles::show_in_explorer(&dest).err().map(|e| tf!("Verkenner openen mislukt: {e}", "Could not open Explorer: {e}"));
         }
         scan
     }
